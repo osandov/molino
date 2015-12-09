@@ -1,0 +1,5 @@
+/.coverage
+/htmlcov
+/molinorc
+*.pyc
+__pycache__
