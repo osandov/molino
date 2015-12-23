@@ -1311,7 +1311,7 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
             seq_set = imap.sequence_set(new_uids)
             self._new_gm_msgids = set()
             self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
-                              'FETCH', seq_set, 'X-GM-MSGID')
+                              'FETCH', seq_set, 'X-GM-MSGID', 'FLAGS')
         if old_uids:
             seq_set = imap.sequence_set(old_uids)
             self._enqueue_cmd(self._handle_tagged,
@@ -1332,7 +1332,7 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
         if new_gm_msgids:
             seq_set = imap.sequence_set(new_gm_msgids)
             self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set,
-                              'ENVELOPE', 'FLAGS')
+                              'ENVELOPE')
         self.dec_pending()
         return True
 
