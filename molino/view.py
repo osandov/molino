@@ -316,6 +316,7 @@ class _IndexView:
         self._model.on_message_add.register(self._message_add)
         self._model.on_message_delete.register(self._message_delete)
         self._model.on_message_update.register(self._message_update)
+        self._model.on_mailbox_update.register(self._mailbox_update)
 
         self._widget = MenuWidget(self._formatter, window,
                                   color_scheme, self._message_sort_key)
@@ -368,6 +369,10 @@ class _IndexView:
     def _formatter(window, color_scheme, key, value, is_indicator):
         if key is None:
             entry = value.name_decoded
+            exists = value.exists
+            unseen = value.num_unseen()
+            if exists is not None and unseen is not None:
+                entry += ' (%d unread / %d messages)' % (unseen, exists)
             entry += ' ' * max(0, window.getmaxyx()[1] - len(entry))
             color = 'index-indicator' if is_indicator else 'index'
             window.insstr(entry, color_scheme[color])
@@ -434,6 +439,12 @@ class _IndexView:
                 if what == 'flags':
                     self._widget.redraw_entry(key)
                     self._widget.refresh()
+        return False
+
+    def _mailbox_update(self, mailbox, what):
+        if mailbox == self._mailbox and (what == 'exists' or what == 'unseen'):
+            self._widget.redraw_entry(None)
+            self._widget.refresh()
         return False
 
 
