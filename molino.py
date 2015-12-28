@@ -3,6 +3,7 @@
 import curses
 import locale
 import logging
+import sqlite3
 import sys
 import traceback
 
@@ -37,7 +38,9 @@ if __name__ == '__main__':
         curses.start_color()
         curses.use_default_colors()
 
-        model = molino.model.Model()
+        db = sqlite3.connect('/tmp/molino.db')
+        db.row_factory = sqlite3.Row
+        model = molino.model.Model(db)
         view = molino.view.View(config, stdscr, model)
         main = molino.operations.MainOperation(config, model, view)
         main.start()

@@ -2,6 +2,7 @@ import contextlib
 import re
 import selectors
 import socket
+import sqlite3
 import subprocess
 from unittest.mock import MagicMock, NonCallableMagicMock
 
@@ -17,7 +18,9 @@ class MockMainOperation(Operation):
         self._sel = selectors.DefaultSelector()
         self._view = NonCallableMagicMock(spec_set=['update_status'])
         self._view.update_status = MagicMock()
-        self._model = model.Model()
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        self._model = model.Model(db)
 
 
 class TestOperation(Operation):
@@ -92,9 +95,12 @@ class TestServer:
         self.test_op = test_op
         self.capabilities = {'IMAP4rev1', 'AUTH=PLAIN'}
         self.correct_password = 'password'
-        self.model = model.Model()
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        self.model = model.Model(db)
 
-        mailbox = model.Mailbox(self.model, b'INBOX', ord('/'), {'\\HasNoChildren'})
+        mailbox = self.model.get_mailbox(b'INBOX')
+        mailbox.attributes = {'\\HasNoChildren'}
         message = model.Message(self.model, 1)
         message.envelope = Envelope(None, b'Hello', None, None, None, None,
                                     None, None, None, None)
@@ -108,7 +114,6 @@ class TestServer:
             mailbox.add_message(999 + 2 * i, message)
         mailbox.set_unseen({999, 1001, 1003})
         mailbox.uids = [None, 700, 999, 1001, 1003]
-        self.model.add_mailbox(mailbox)
 
         mailbox = model.Mailbox(self.model, b'LKML', ord('/'), {'\\HasNoChildren'})
         message = model.Message(self.model, 1)
@@ -134,7 +139,7 @@ class TestServer:
                 assert False, 'Unexpected item %s' % item
         resp = UntaggedResponse('STATUS', Status(mailbox.name, status))
         self.test_op.dispatch(resp)
-    
+
     def _ok(self, tag):
         resp = TaggedResponse(tag, 'OK', ResponseText('Success', None, None))
         self.test_op.dispatch(resp)

@@ -3,18 +3,72 @@ import email.utils
 
 from molino.callbackstack import callback_stack
 import molino.imap.codecs
+from molino.imap.parser import Address, Envelope
 
 
 class Model:
     """
     The email client is essentially a sync engine between the actual state on
-    the IMAP server and the view presented to the user. We cache just about
-    everything the server tells us in memory.
+    the IMAP server and the view presented to the user. Data from the IMAP
+    server is cached in two levels: on disk as a SQLite database and in memory.
+
+    The database uses several tables to cache data and metadata. The
+    'mailboxes' table stores the mailbox list metadata. The mailbox name is the
+    primary key. The 'gmail_mailbox_uids' table maps the UIDs in a mailbox to
+    the Gmail message ID. The 'gmail_messages' table maps Gmail message IDs to
+    message metadata. The 'gmail_message_bodies' table maps section names of a
+    message body to the contents.
     """
 
-    def __init__(self):
-        self.__mailboxes = {b'INBOX': Mailbox(self, b'INBOX', ord('/'), set())}
+    def __init__(self, db):
+        self._db = db
+        self.__mailboxes = {}
         self.__gmail_msgs = {}
+
+        self._db.execute('''
+        CREATE TABLE IF NOT EXISTS mailboxes (
+            name BLOB PRIMARY KEY,
+            delimiter INTEGER,
+            attributes BLOB,
+            exists_ INTEGER,
+            unseen INTEGER
+        )''')
+        self._db.execute('INSERT OR IGNORE INTO mailboxes VALUES (?, ?, ?, ?, ?)',
+                         (b'INBOX', ord('/'), adapt_flags(set()), None, None))
+
+        self._db.execute('''
+        CREATE TABLE IF NOT EXISTS gmail_mailbox_uids (
+            mailbox BLOB,
+            uid INTEGER,
+            gm_msgid INTEGER,
+            PRIMARY KEY (mailbox, uid ASC)
+        )''')
+
+        self._db.execute('''
+        CREATE TABLE IF NOT EXISTS gmail_messages (
+            gm_msgid INTEGER PRIMARY KEY,
+            date BLOB,
+            subject BLOB,
+            from_ BLOB,
+            sender BLOB,
+            reply_to BLOB,
+            to_ BLOB,
+            cc BLOB,
+            bcc BLOB,
+            in_reply_to BLOB,
+            message_id BLOB,
+            flags BLOB
+        )''')
+
+        self._db.execute('''
+        CREATE TABLE IF NOT EXISTS gmail_message_bodies (
+            gm_msgid INTEGER,
+            section STRING,
+            body BLOB,
+            PRIMARY KEY (gm_msgid, section)
+        )''')
+
+        self._db.commit()
 
     # Mailboxes
 
@@ -23,21 +77,44 @@ class Model:
         Get the mailbox with the given name or raise KeyError if there is no
         such mailbox.
         """
-        return self.__mailboxes[name]
+        try:
+            return self.__mailboxes[name]
+        except KeyError:
+            pass
+        cur = self._db.execute('SELECT * FROM mailboxes WHERE name=?', (name,))
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError
+        mailbox = row_to_mailbox(self, row)
+        self.__mailboxes[name] = mailbox
+        return mailbox
 
     def add_mailbox(self, mailbox):
-        """Add the given mailbox to the database."""
+        """Add the given mailbox to the cache."""
         self.__mailboxes[mailbox.name] = mailbox
+        attributes = adapt_flags(mailbox.attributes)
+        self._db.execute('INSERT INTO mailboxes VALUES (?, ?, ?, ?, ?)',
+                         (mailbox.name, mailbox.delimiter, attributes,
+                          mailbox.exists, mailbox.num_unseen()))
+        self._db.commit()
         self.on_mailboxes_add(mailbox)
 
     def delete_mailbox(self, name):
-        """Delete the mailbox with the given name from the database."""
+        """Delete the mailbox with the given name from the cache."""
         mailbox = self.__mailboxes.pop(name)
+        self._db.execute('DELETE FROM mailboxes WHERE name=?', (name,))
+        self._db.commit()
         self.on_mailboxes_delete(mailbox)
 
     def mailboxes(self):
-        """Return an iterator over all of the mailboxes in the database."""
-        return self.__mailboxes.values()
+        """Return an iterator over all of the mailboxes in the cache."""
+        for row in self._db.execute('SELECT * FROM mailboxes'):
+            try:
+                yield self.__mailboxes[row['name']]
+            except KeyError:
+                mailbox = row_to_mailbox(self, row)
+                self.__mailboxes[row['name']] = mailbox
+                yield mailbox
 
     @callback_stack
     def on_mailboxes_add(self, mailbox):
@@ -56,6 +133,43 @@ class Model:
 
     # Messages
 
+    def get_gmail_message(self, gm_msgid):
+        try:
+            return self.__gmail_msgs[gm_msgid]
+        except KeyError:
+            pass
+        cur = self._db.execute('SELECT * FROM gmail_messages WHERE gm_msgid=?', (gm_msgid,))
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError
+        message = row_to_message(self, row)
+        self.__gmail_msgs[gm_msgid] = message
+        return message
+
+    def add_gmail_message(self, message):
+        self.__gmail_msgs[message.gm_msgid] = message
+        envelope = convert_envelope(message.envelope)
+        self._db.execute('''INSERT INTO gmail_messages
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                         (message.gm_msgid, *envelope, message.flags))
+        self._db.commit()
+
+    def delete_gmail_message(self, gm_msgid):
+        del self.__gmail_msgs[gm_msgid]
+        self._db.execute('DELETE FROM gmail_messages WHERE gm_msgid=?', (gm_msgid,))
+        self._db.commit()
+
+    def gmail_messages(self):
+        cur = self._db.execute('SELECT * FROM gmail_messages')
+        for row in cur:
+            gm_msgid = row['gm_msgid']
+            try:
+                yield self.__gmail_msgs[gm_msgid]
+            except KeyError:
+                message = row_to_message(self, row)
+                self.__gmail_msgs[gm_msgid] = message
+                yield message
+
     @callback_stack
     def on_message_add(self, mailbox, uid, message):
         """Message was added to a Mailbox."""
@@ -71,17 +185,14 @@ class Model:
         """Message was updated."""
         return True
 
-    @property
-    def gmail_msgs(self):
-        """Mapping from Gmail message ID to Message object."""
-        return self.__gmail_msgs
-
 
 class Mailbox:
     """Cache of an IMAP mailbox."""
 
-    def __init__(self, model, name, delimiter, attributes):
+    def __init__(self, model, name, delimiter, attributes, exists=None,
+                 unseen=None):
         self._model = model
+        self._db = self._model._db
         self.__name = name
         try:
             self.__name_decoded = self.__name.decode('imap-utf-7')
@@ -93,9 +204,9 @@ class Mailbox:
             self.__name_decoded = 'Inbox'
         self.__delimiter = delimiter
         self.__attributes = attributes
-        self.__exists = None
+        self.__exists = exists
         self.__unseen = set()
-        self.__num_unseen = None
+        self.__num_unseen = unseen
         self.__recent = None
         self.__flags = None
         self.__uids = []
@@ -120,8 +231,12 @@ class Mailbox:
 
     @delimiter.setter
     def delimiter(self, value):
-        self.__delimiter = value
-        self._model.on_mailbox_update(self, 'delimiter')
+        if value != self.__delimiter:
+            self.__delimiter = value
+            self._db.execute('UPDATE mailboxes SET delimiter=? WHERE name=?',
+                             (value, self.name))
+            self._db.commit()
+            self._model.on_mailbox_update(self, 'delimiter')
 
     @property
     def attributes(self):
@@ -131,8 +246,12 @@ class Mailbox:
 
     @attributes.setter
     def attributes(self, value):
-        self.__attributes = value
-        self._model.on_mailbox_update(self, 'attributes')
+        if value != self.__attributes:
+            self.__attributes = value
+            self._db.execute('UPDATE mailboxes SET attributes=? WHERE name=?',
+                             (adapt_flags(value), self.name))
+            self._db.commit()
+            self._model.on_mailbox_update(self, 'attributes')
 
     def can_select(self):
         """
@@ -150,6 +269,9 @@ class Mailbox:
     @exists.setter
     def exists(self, value):
         self.__exists = value
+        self._db.execute('UPDATE mailboxes SET exists_=? WHERE name=?',
+                         (value, self.name))
+        self._db.commit()
         self._model.on_mailbox_update(self, 'exists')
 
     def set_unseen(self, uids):
@@ -171,6 +293,9 @@ class Mailbox:
         """Set the number of unseen messages."""
         if num != self.__num_unseen:
             self.__num_unseen = num
+            self._db.execute('UPDATE mailboxes SET unseen=? WHERE name=?',
+                             (num, self.name))
+            self._db.commit()
             self._model.on_mailbox_update(self, 'unseen')
 
     def num_unseen(self):
@@ -216,27 +341,59 @@ class Mailbox:
         Get the message with the given UID or raise KeyError if there is no
         such message.
         """
-        return self.__messages[uid]
+        try:
+            return self.__messages[uid]
+        except KeyError:
+            pass
+        cur = self._db.execute('''SELECT gm_msgid FROM gmail_mailbox_uids
+                                  WHERE mailbox=? AND uid=?''',
+                               (self.name, uid))
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError
+        message = self._model.get_gmail_message(row['gm_msgid'])
+        self.__messages[uid] = message
+        return message
 
     def contains_message(self, uid):
         """Return whether the mailbox contains a message with the given UID."""
-        return uid in self.__messages
+        try:
+            self.get_message(uid)
+            return True
+        except KeyError:
+            return False
 
     def add_message(self, uid, message):
         """Add a message with the given UID to the mailbox."""
         self.__messages[uid] = message
+        self._db.execute('INSERT INTO gmail_mailbox_uids VALUES (?, ?, ?)',
+                         (self.name, uid, message.gm_msgid))
+        self._db.commit()
         self._model.on_message_add(self, uid, message)
 
     def delete_message(self, uid):
         """Delete the message with the given UID from the mailbox."""
         message = self.__messages.pop(uid)
+        self._db.execute('DELETE FROM gmail_mailbox_uids WHERE mailbox=? AND uid=?',
+                         (self.name, uid))
+        self._db.commit()
         self._model.on_message_delete(self, uid, message)
 
     def messages(self):
         """
         Return an iterator over all of the (UID, message) pairs in the mailbox.
         """
-        return self.__messages.items()
+        cur = self._db.execute('SELECT uid, gm_msgid FROM gmail_mailbox_uids WHERE mailbox=?',
+                               (self.name,))
+        for row in cur:
+            uid = row['uid']
+            gm_msgid = row['gm_msgid']
+            try:
+                yield uid, self.__messages[uid]
+            except KeyError:
+                message = self._model.get_gmail_message(gm_msgid)
+                self.__messages[uid] = message
+                yield uid, message
 
 
 def _decode_header(b):
@@ -266,13 +423,13 @@ def _addr_list(l, name_only):
 
 
 class Message:
-    def __init__(self, model, id):
+    def __init__(self, model, id, envelope=None, bodystructure=None, flags=None):
         self._model = model
+        self._db = self._model._db
         self.__id = id
-        self.__envelope = None
-        self.__bodystructure = None
-        self.__body = {}
-        self.__flags = None
+        self.__envelope = envelope
+        self.__bodystructure = bodystructure
+        self.__flags = flags
 
     @property
     def id(self):
@@ -284,14 +441,26 @@ class Message:
         return self.__id
 
     @property
+    def gm_msgid(self):
+        return self.__id
+
+    @property
     def envelope(self):
         """Internet Message Format envelope."""
         return self.__envelope
 
     @envelope.setter
     def envelope(self, value):
-        self.__envelope = value
-        self._model.on_message_update(self, 'envelope')
+        if self.__envelope is None:
+            self.__envelope = value
+            envelope = convert_envelope(value)
+            self._db.execute('''UPDATE gmail_messages SET
+                                date=?, subject=?, from_=?, sender=?,
+                                reply_to=?, to_=?, cc=?, bcc=?, in_reply_to=?,
+                                message_id=? WHERE gm_msgid=?''',
+                             (*envelope, self.gm_msgid))
+            self._db.commit()
+            self._model.on_message_update(self, 'envelope')
 
     def subject(self):
         """
@@ -349,16 +518,29 @@ class Message:
 
     def get_body_section(self, section):
         """Get the given body section or raise KeyError if it is not cached."""
-        return self.__body[section]
+        cur = self._db.execute('''SELECT body FROM gmail_message_bodies
+                                  WHERE gm_msgid=? AND section=?''',
+                               (self.gm_msgid, section))
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError
+        return row['body']
 
     def have_body_section(self, section):
         """Return whether the given section is cached."""
-        return section in self.__body
+        try:
+            # XXX: is there a better way to do this?
+            self.get_body_section(section)
+            return True
+        except KeyError:
+            return False
 
     def add_body_sections(self, sections):
         for section, (content, origin) in sections.items():
             assert origin is None
-            self.__body[section] = content
+            self._db.execute('INSERT INTO gmail_message_bodies VALUES (?, ?, ?)',
+                             (self.gm_msgid, section, content))
+            self._db.commit()
         self._model.on_message_update(self, 'body')
 
     @property
@@ -369,4 +551,108 @@ class Message:
     @flags.setter
     def flags(self, value):
         self.__flags = value
+        self._db.execute('UPDATE gmail_messages SET flags=? WHERE gm_msgid=?',
+                         (adapt_flags(self.flags), self.gm_msgid))
+        self._db.commit()
         self._model.on_message_update(self, 'flags')
+
+
+def row_to_mailbox(model, row):
+    return Mailbox(model, name=row['name'],
+                   delimiter=row['delimiter'],
+                   attributes=convert_flags(row['attributes']),
+                   exists=row['exists_'],
+                   unseen=row['unseen'])
+
+
+def row_to_message(model, row):
+    envelope = Envelope(date=convert_datetime(row['date']),
+                        subject=row['subject'],
+                        from_=convert_addrs(row['from_']),
+                        sender=convert_addrs(row['sender']),
+                        reply_to=convert_addrs(row['reply_to']),
+                        to=convert_addrs(row['to_']),
+                        cc=convert_addrs(row['cc']),
+                        bcc=convert_addrs(row['bcc']),
+                        in_reply_to=row['in_reply_to'],
+                        message_id=row['message_id'])
+    if all(x is None for x in envelope):
+        envelope = None
+    return Message(model, row['gm_msgid'], envelope=envelope,
+                   bodystructure=None, flags=convert_flags(row['flags']))
+
+
+def adapt_addrs(addrs):
+    if addrs is None:
+        return None
+    strs = []
+    for addr in addrs:
+        if not addr.mailbox or not addr.host:
+            continue
+        addr_spec = b'%s@%s' % (addr.mailbox, addr.host)
+        if addr.name:
+            # email.utils.quote() takes str, not bytes.
+            name = addr.name.replace(b'\\', b'\\\\').replace(b'"', b'\\"')
+            strs.append(b'"%s" <%s>' % (name, addr_spec))
+        else:
+            strs.append(addr_spec)
+    return b'\n'.join(strs)
+
+
+def convert_addrs(s):
+    if s is None:
+        return None
+    strs = [addr.decode('ascii') for addr in s.split(b'\n')]
+    l = []
+    for name, addr_spec in email.utils.getaddresses(strs):
+        mailbox, host = addr_spec.split('@')
+        l.append(Address(name.encode('ascii'), None, mailbox.encode('ascii'), host.encode('ascii')))
+    return l
+
+
+def adapt_datetime(dt):
+    if dt is None:
+        return None
+    else:
+        return email.utils.format_datetime(dt).encode('ascii')
+
+
+def convert_datetime(s):
+    if s is None:
+        return None
+    else:
+        return email.utils.parsedate_to_datetime(s.decode('ascii'))
+
+
+def adapt_flags(flags):
+    if flags is None:
+        return None
+    else:
+        return ','.join(flags).encode('ascii')
+
+
+def convert_flags(s):
+    if s is None:
+        return None
+    elif s == b'':
+        return set()
+    else:
+        return set(s.decode('ascii').split(','))
+
+
+def convert_envelope(envelope):
+    if envelope is None:
+        return (None,) * 10
+    else:
+        return (
+                adapt_datetime(envelope.date),
+                envelope.subject,
+                adapt_addrs(envelope.from_),
+                adapt_addrs(envelope.sender),
+                adapt_addrs(envelope.reply_to),
+                adapt_addrs(envelope.to),
+                adapt_addrs(envelope.cc),
+                adapt_addrs(envelope.bcc),
+                envelope.in_reply_to,
+                envelope.message_id
+        )

@@ -31,9 +31,9 @@ class TestGmailFetchMessagesOperation(unittest.TestCase):
     def test_ok(self):
         self.server.selected = b'INBOX'
         mailbox = self.server.model.get_mailbox(self.server.selected)
-        seq_set = [(1, len(mailbox.messages()))]
+        seq_set = [(1, len(set(mailbox.messages())))]
         self.test_op._mailbox = self.test_op._model.get_mailbox(self.server.selected)
-        self.test_op._mailbox.uids = [None] * (len(mailbox.messages()) + 1)
+        self.test_op._mailbox.uids = [None] * (len(set(mailbox.messages())) + 1)
         self.op = GmailFetchMessagesOperation(self.test_op, seq_set)
         self.op.callback = op_callback()
         self.op.start()
@@ -44,7 +44,7 @@ class TestGmailFetchMessagesOperation(unittest.TestCase):
     def test_old_uids(self):
         self.server.selected = b'INBOX'
         mailbox = self.server.model.get_mailbox(self.server.selected)
-        seq_set = [(1, len(mailbox.messages()))]
+        seq_set = [(1, len(set(mailbox.messages())))]
         test_mailbox = self.test_op._model.get_mailbox(self.server.selected)
         uid, message = list(mailbox.messages())[0]
         test_message = model.Message(self.test_op._model, message.id)
@@ -52,7 +52,7 @@ class TestGmailFetchMessagesOperation(unittest.TestCase):
         test_message.flags = {'\\Invalid'}
         test_mailbox.add_message(uid, test_message)
         self.test_op._mailbox = test_mailbox
-        self.test_op._mailbox.uids = [None] * (len(mailbox.messages()) + 1)
+        self.test_op._mailbox.uids = [None] * (len(set(mailbox.messages())) + 1)
         self.op = GmailFetchMessagesOperation(self.test_op, seq_set)
         self.op.callback = op_callback()
         self.op.start()

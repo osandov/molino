@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 from unittest.mock import MagicMock
 
@@ -7,7 +8,9 @@ from molino.imap.parser import *
 
 class TestMessage(unittest.TestCase):
     def setUp(self):
-        self.model = Model()
+        self.db = sqlite3.connect(':memory:')
+        self.db.row_factory = sqlite3.Row
+        self.model = Model(self.db)
 
     def test_id(self):
         message = Message(self.model, 1337)
@@ -130,7 +133,9 @@ class TestMessage(unittest.TestCase):
 
 class TestMailbox(unittest.TestCase):
     def setUp(self):
-        self.model = Model()
+        self.db = sqlite3.connect(':memory:')
+        self.db.row_factory = sqlite3.Row
+        self.model = Model(self.db)
 
     def test_name(self):
         mailbox = Mailbox(self.model, b'INBOX', ord('/'), set())
@@ -307,57 +312,55 @@ class TestMailbox(unittest.TestCase):
 
 
 class TestModel(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(':memory:')
+        self.db.row_factory = sqlite3.Row
+        self.model = Model(self.db)
+
     def test_init(self):
-        model = Model()
-        self.assertEqual({mbx.name for mbx in model.mailboxes()}, {b'INBOX'})
-        inbox = model.get_mailbox(b'INBOX')
+        self.assertEqual({mbx.name for mbx in self.model.mailboxes()}, {b'INBOX'})
+        inbox = self.model.get_mailbox(b'INBOX')
         self.assertEqual(inbox.delimiter, ord('/'))
         self.assertEqual(inbox.attributes, set())
-        self.assertRaises(KeyError, model.get_mailbox, b'Foo')
+        self.assertRaises(KeyError, self.model.get_mailbox, b'Foo')
 
     def test_mailboxes(self):
-        model = Model()
         add_callback = MagicMock(return_value=False)
         delete_callback = MagicMock(return_value=False)
-        model.on_mailboxes_add.register(add_callback)
-        model.on_mailboxes_delete.register(delete_callback)
+        self.model.on_mailboxes_add.register(add_callback)
+        self.model.on_mailboxes_delete.register(delete_callback)
 
-        mailbox1 = Mailbox(model, b'Foo', ord('/'), set())
-        mailbox2 = Mailbox(model, b'Bar', ord('/'), set())
+        mailbox1 = Mailbox(self.model, b'Foo', ord('/'), set())
+        mailbox2 = Mailbox(self.model, b'Bar', ord('/'), set())
 
-        model.add_mailbox(mailbox1)
+        self.model.add_mailbox(mailbox1)
         add_callback.assert_called_once_with(mailbox1)
         add_callback.reset_mock()
-        self.assertEqual(model.get_mailbox(b'Foo'), mailbox1)
-        self.assertEqual({mbx.name for mbx in model.mailboxes()}, {b'INBOX', b'Foo'})
+        self.assertEqual(self.model.get_mailbox(b'Foo'), mailbox1)
+        self.assertEqual({mbx.name for mbx in self.model.mailboxes()}, {b'INBOX', b'Foo'})
 
-        model.add_mailbox(mailbox2)
+        self.model.add_mailbox(mailbox2)
         add_callback.assert_called_once_with(mailbox2)
         add_callback.reset_mock()
-        self.assertEqual(model.get_mailbox(b'Foo'), mailbox1)
-        self.assertEqual(model.get_mailbox(b'Bar'), mailbox2)
-        self.assertEqual({mbx.name for mbx in model.mailboxes()}, {b'INBOX', b'Foo', b'Bar'})
+        self.assertEqual(self.model.get_mailbox(b'Foo'), mailbox1)
+        self.assertEqual(self.model.get_mailbox(b'Bar'), mailbox2)
+        self.assertEqual({mbx.name for mbx in self.model.mailboxes()}, {b'INBOX', b'Foo', b'Bar'})
 
-        model.delete_mailbox(b'Foo')
+        self.model.delete_mailbox(b'Foo')
         delete_callback.assert_called_once_with(mailbox1)
         delete_callback.reset_mock()
-        self.assertEqual(model.get_mailbox(b'Bar'), mailbox2)
-        self.assertEqual({mbx.name for mbx in model.mailboxes()}, {b'INBOX', b'Bar'})
+        self.assertEqual(self.model.get_mailbox(b'Bar'), mailbox2)
+        self.assertEqual({mbx.name for mbx in self.model.mailboxes()}, {b'INBOX', b'Bar'})
 
-        model.delete_mailbox(b'Bar')
+        self.model.delete_mailbox(b'Bar')
         delete_callback.assert_called_once_with(mailbox2)
         delete_callback.reset_mock()
-        self.assertEqual({mbx.name for mbx in model.mailboxes()}, {b'INBOX'})
+        self.assertEqual({mbx.name for mbx in self.model.mailboxes()}, {b'INBOX'})
 
     def test_gmail_msgs(self):
-        model = Model()
-        message = Message(model, 1337)
-        self.assertEqual(model.gmail_msgs, {})
-        model.gmail_msgs[1] = message
-        self.assertEqual(model.gmail_msgs, {1: message})
-        del model.gmail_msgs[1]
-        self.assertEqual(model.gmail_msgs, {})
-        with self.assertRaises(AttributeError):
-            del model.gmail_msgs
-        with self.assertRaises(AttributeError):
-            model.gmail_msgs = {}
+        message = Message(self.model, 1337)
+        self.assertEqual(set(self.model.gmail_messages()), set())
+        self.model.add_gmail_message(message)
+        self.assertEqual(set(self.model.gmail_messages()), {message})
+        self.model.delete_gmail_message(1337)
+        self.assertEqual(set(self.model.gmail_messages()), set())

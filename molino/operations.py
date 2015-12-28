@@ -59,7 +59,7 @@ class Operation:
         Increment the count of pending actions this operation is waiting on.
         """
         assert self._pending is not None
-        logging.debug('%r +1 = %d' % (self, self._pending + 1))
+        #  logging.debug('%r +1 = %d' % (self, self._pending + 1))
         self._pending += 1
 
     def dec_pending(self):
@@ -67,7 +67,7 @@ class Operation:
         Decrement the count pending actions this operation is waiting on. If
         the count reaches zero, call self.done() to cleanup.
         """
-        logging.debug('%r -1 = %d' % (self, self._pending - 1))
+        #  logging.debug('%r -1 = %d' % (self, self._pending - 1))
         self._pending -= 1
         if self._pending == 0:
             self._pending = None
@@ -467,6 +467,7 @@ class _IMAPConnectionOperation(MainSubOperation):
         while True:
             try:
                 n = self._sock.recv_into(self._recv_buf)
+                #  logging.debug('S: %s' % self._recv_buf[:n])
                 if n == 0:
                     self.update_status('Disconnected', StatusLevel.error)
                     self.dec_pending()
@@ -511,9 +512,9 @@ class _IMAPConnectionOperation(MainSubOperation):
             if conts and self._send_pos == conts[0]:
                 break
             end = conts[0] if conts else len(send_buf)
-            # logging.debug('Sending %r' % send_buf[self._send_pos:end])
             try:
                 n = self._sock.send(send_buf[self._send_pos:end])
+                #  logging.debug('C: %s' % send_buf[self._send_pos:self._send_pos + n])
                 self._send_pos += n
                 if self._send_pos >= len(send_buf):
                     self._send_queue.popleft()
@@ -1234,11 +1235,14 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def _handle_fetch(self, resp):
         fetch = resp.data
         try:
-            uid = self._mailbox.uids[fetch.msg]
-            message = self._mailbox.get_message(uid)
+            uid = fetch.items['UID']
         except KeyError:
-            # XXX
-            return True
+            try:
+                uid = self._mailbox.uids[fetch.msg]
+            except KeyError:
+                # XXX
+                return True
+        message = self._mailbox.get_message(uid)
         if 'ENVELOPE' in fetch.items:
             message.envelope = fetch.items['ENVELOPE']
         if 'BODYSTRUCTURE' in fetch.items:
@@ -1353,19 +1357,21 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
                 self._old_uids.add(fetch.msg)
             else:
                 self._new_uids.add(fetch.msg)
-        if self._fetching_gm_msgids:
+            return True
+        elif self._fetching_gm_msgids:
             uid = self._mailbox.uids[fetch.msg]
             assert uid is not None
             msgid = fetch.items['X-GM-MSGID']
             try:
-                message = self._model.gmail_msgs[msgid]
+                message = self._model.get_gmail_message(msgid)
             except KeyError:
                 message = model.Message(self._model, msgid)
-                self._model.gmail_msgs[msgid] = message
+                self._model.add_gmail_message(message)
+            if not message.envelope:
                 self._new_gm_msgids.add(fetch.msg)
             self._mailbox.add_message(uid, message)
-        # _IMAPSelectedState handles other FETCH items
-        return False
+            # _IMAPSelectedState handles other FETCH items
+            return False
 
 
 class IMAPIdleOperation(_IMAPSubOperation):

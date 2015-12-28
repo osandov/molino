@@ -222,8 +222,10 @@ class _MailboxSidebar:
         self._model.on_mailbox_update.register(self._mailbox_update)
         self._widget = MenuWidget(self._formatter, window,
                                   color_scheme, self._mailbox_sort_key)
+        self._mailboxes_add(self._model.get_mailbox(b'INBOX'), False)
         for mailbox in self._model.mailboxes():
-            self._mailboxes_add(mailbox, False)
+            if mailbox.name != b'INBOX':
+                self._mailboxes_add(mailbox, False)
         self._widget.refresh()
 
     @staticmethod
@@ -232,12 +234,12 @@ class _MailboxSidebar:
             # The inbox should come first
             return 0, None, None
         elif key.startswith('[Gmail]'):
+            # Gmail mailboxes should come last.
             return 2, locale.strxfrm(key.casefold()), key
         else:
             # Otherwise, sort alphabetically and break ties lexicographically
             # (this can happen if there are two mailboxes which differ only in
             # case; Gmail doesn't allow this but other mail servers might).
-            # Mailboxes starting with symbols come last.
             return 1, locale.strxfrm(key.casefold()), key
 
     def hide(self):
@@ -552,7 +554,6 @@ class _MessageView:
                     except KeyError:
                         continue
                     decoded = self._decode_text_body(body, content)
-                    logging.debug(decoded)
                     self._widget.add(decoded, 'body')
         self._widget.flush()
         self._widget.refresh()
