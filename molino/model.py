@@ -1,9 +1,11 @@
+import ast
+import datetime
 import email.header
 import email.utils
 
 from molino.callbackstack import callback_stack
 import molino.imap.codecs
-from molino.imap.parser import Address, Envelope
+from molino.imap.parser import Address, Envelope, TextBody, MessageBody, BasicBody, MultipartBody
 
 
 class Model:
@@ -57,6 +59,7 @@ class Model:
             bcc BLOB,
             in_reply_to BLOB,
             message_id BLOB,
+            bodystructure STRING,
             flags BLOB
         )''')
 
@@ -148,10 +151,11 @@ class Model:
 
     def add_gmail_message(self, message):
         self.__gmail_msgs[message.gm_msgid] = message
-        envelope = convert_envelope(message.envelope)
+        envelope = adapt_envelope(message.envelope)
+        body = adapt_bodystructure(message.bodystructure)
         self._db.execute('''INSERT INTO gmail_messages
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                         (message.gm_msgid, *envelope, message.flags))
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                         (message.gm_msgid, *envelope, body, message.flags))
         self._db.commit()
 
     def delete_gmail_message(self, gm_msgid):
@@ -453,7 +457,7 @@ class Message:
     def envelope(self, value):
         if self.__envelope is None:
             self.__envelope = value
-            envelope = convert_envelope(value)
+            envelope = adapt_envelope(value)
             self._db.execute('''UPDATE gmail_messages SET
                                 date=?, subject=?, from_=?, sender=?,
                                 reply_to=?, to_=?, cc=?, bcc=?, in_reply_to=?,
@@ -514,6 +518,9 @@ class Message:
     @bodystructure.setter
     def bodystructure(self, value):
         self.__bodystructure = value
+        self._db.execute('UPDATE gmail_messages SET bodystructure=? WHERE gm_msgid=?',
+                         (adapt_bodystructure(self.bodystructure), self.gm_msgid))
+        self._db.commit()
         self._model.on_message_update(self, 'bodystructure')
 
     def get_body_section(self, section):
@@ -579,7 +586,8 @@ def row_to_message(model, row):
     if all(x is None for x in envelope):
         envelope = None
     return Message(model, row['gm_msgid'], envelope=envelope,
-                   bodystructure=None, flags=convert_flags(row['flags']))
+                   bodystructure=convert_bodystructure(row['bodystructure']),
+                   flags=convert_flags(row['flags']))
 
 
 def adapt_addrs(addrs):
@@ -640,7 +648,74 @@ def convert_flags(s):
         return set(s.decode('ascii').split(','))
 
 
-def convert_envelope(envelope):
+def adapt_bodystructure(body):
+    def simplify_addresses(addrs):
+        if addrs:
+            return [addr[:] for addr in addrs]
+        else:
+            return None
+    def simplify_datetime(dt):
+        if dt:
+            return (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond,
+                    dt.tzinfo.utcoffset(dt).total_seconds() if dt.tzinfo else None)
+        else:
+            return None
+    def simplify_envelope(envelope):
+        return (simplify_datetime(envelope.date), envelope.subject,
+                simplify_addresses(envelope.from_), simplify_addresses(envelope.sender),
+                simplify_addresses(envelope.reply_to), simplify_addresses(envelope.to),
+                simplify_addresses(envelope.cc), simplify_addresses(envelope.bcc),
+                envelope.in_reply_to, envelope.message_id)
+    def simplify_body(body):
+        if isinstance(body, TextBody):
+            return body[:]
+        elif isinstance(body, MessageBody):
+            return (body[:7] + (simplify_envelope(body.envelope), simplify_body(body.body)) +
+                    body[9:])
+        elif isinstance(body, BasicBody):
+            return body[:]
+        elif isinstance(body, MultipartBody):
+            return (body[:2] + ([simplify_body(part) for part in body.parts],) +
+                    body[3:])
+    if body is None:
+        return None
+    else:
+        return repr(simplify_body(body))
+
+
+def convert_bodystructure(s):
+    def recover_addresses(l):
+        if l:
+            return [Address(*t) for t in l]
+        else:
+            return None
+    def recover_datetime(t):
+        if t:
+            tzinfo = datetime.timezone(datetime.timedelta(seconds=t[-1]))
+            return datetime.datetime(*t[:-1], tzinfo)
+        else:
+            return None
+    def recover_envelope(t):
+        return Envelope(recover_datetime(t[0]), t[1],
+                        recover_addresses(t[2]), recover_addresses(t[3]),
+                        recover_addresses(t[4]), recover_addresses(t[5]),
+                        recover_addresses(t[6]), recover_addresses(t[7]),
+                        t[8], t[9])
+    def recover_body(t):
+        if t[0] == 'text':
+            return TextBody(*t)
+        elif t[0] == 'message' and t[1] == 'rfc822':
+            return MessageBody(*t[:7], recover_envelope(t[7]), recover_body(t[8]), *t[9:])
+        elif t[0] != 'multipart':
+            return BasicBody(*t)
+        else:
+            return MultipartBody(*t[:2], [recover_body(part) for part in t[2]], *t[3:])
+    if s is None:
+        return None
+    else:
+        return recover_body(ast.literal_eval(s))
+
+def adapt_envelope(envelope):
     if envelope is None:
         return (None,) * 10
     else:

@@ -141,7 +141,7 @@ ENVELOPE fetch item.
 
 date - datetime.datetime or None
 subject - bytes or None
-from - list of Address or None
+from_ - list of Address or None
 sender - list of Address or None
 reply_to - list of Address or None
 to - list of Address or None
