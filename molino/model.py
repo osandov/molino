@@ -31,8 +31,8 @@ class Model:
         CREATE TABLE IF NOT EXISTS mailboxes (
             name BLOB PRIMARY KEY,
             delimiter INTEGER,
-            attributes BLOB,
-            exists_ INTEGER,
+            attributes TEXT,
+            "exists" INTEGER,
             unseen INTEGER
         )''')
         self._db.execute('INSERT OR IGNORE INTO mailboxes VALUES (?, ?, ?, ?, ?)',
@@ -51,22 +51,22 @@ class Model:
             gm_msgid INTEGER PRIMARY KEY,
             date BLOB,
             subject BLOB,
-            from_ BLOB,
+            "from" BLOB,
             sender BLOB,
             reply_to BLOB,
-            to_ BLOB,
+            "to" BLOB,
             cc BLOB,
             bcc BLOB,
             in_reply_to BLOB,
             message_id BLOB,
-            bodystructure STRING,
-            flags BLOB
+            bodystructure TEXT,
+            flags TEXT
         )''')
 
         self._db.execute('''
         CREATE TABLE IF NOT EXISTS gmail_message_bodies (
             gm_msgid INTEGER,
-            section STRING,
+            section TEXT,
             body BLOB,
             PRIMARY KEY (gm_msgid, section)
         )''')
@@ -273,7 +273,7 @@ class Mailbox:
     @exists.setter
     def exists(self, value):
         self.__exists = value
-        self._db.execute('UPDATE mailboxes SET exists_=? WHERE name=?',
+        self._db.execute('UPDATE mailboxes SET "exists"=? WHERE name=?',
                          (value, self.name))
         self._db.commit()
         self._model.on_mailbox_update(self, 'exists')
@@ -459,8 +459,8 @@ class Message:
             self.__envelope = value
             envelope = adapt_envelope(value)
             self._db.execute('''UPDATE gmail_messages SET
-                                date=?, subject=?, from_=?, sender=?,
-                                reply_to=?, to_=?, cc=?, bcc=?, in_reply_to=?,
+                                date=?, subject=?, "from"=?, sender=?,
+                                reply_to=?, "to"=?, cc=?, bcc=?, in_reply_to=?,
                                 message_id=? WHERE gm_msgid=?''',
                              (*envelope, self.gm_msgid))
             self._db.commit()
@@ -568,17 +568,17 @@ def row_to_mailbox(model, row):
     return Mailbox(model, name=row['name'],
                    delimiter=row['delimiter'],
                    attributes=convert_flags(row['attributes']),
-                   exists=row['exists_'],
+                   exists=row['exists'],
                    unseen=row['unseen'])
 
 
 def row_to_message(model, row):
     envelope = Envelope(date=convert_datetime(row['date']),
                         subject=row['subject'],
-                        from_=convert_addrs(row['from_']),
+                        from_=convert_addrs(row['from']),
                         sender=convert_addrs(row['sender']),
                         reply_to=convert_addrs(row['reply_to']),
-                        to=convert_addrs(row['to_']),
+                        to=convert_addrs(row['to']),
                         cc=convert_addrs(row['cc']),
                         bcc=convert_addrs(row['bcc']),
                         in_reply_to=row['in_reply_to'],
@@ -636,7 +636,7 @@ def adapt_flags(flags):
     if flags is None:
         return None
     else:
-        return ','.join(flags).encode('ascii')
+        return ','.join(flags)
 
 
 def convert_flags(s):
@@ -645,7 +645,7 @@ def convert_flags(s):
     elif s == b'':
         return set()
     else:
-        return set(s.decode('ascii').split(','))
+        return set(s.split(','))
 
 
 def adapt_bodystructure(body):
