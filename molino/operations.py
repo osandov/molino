@@ -1173,7 +1173,7 @@ class _IMAPSelectedState(_IMAPStateOperation):
         self._fetching = True
         self.update_status('Fetching %s (%d)' % (self._mailbox.name_decoded, len(self._seque)),
                            StatusLevel.info)
-        fetch_op = GmailFetchMessagesOperation(self, self._seque.get(50))
+        fetch_op = GmailFetchMessagesOperation(self, self._seque.get(150))
         fetch_op.callback = self._fetch_new_done
         fetch_op.start()
 
