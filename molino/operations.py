@@ -1270,7 +1270,8 @@ class _IMAPSelectedState(_IMAPStateOperation):
             else:
                 self._unseen.add(uid)
             if len(self._unseen) != old_unseen:
-                update['unseen'] = len(self._unseen)
+                self._cache.update_mailbox(self._mailbox, unseen=len(self._unseen))
+                want_commit = True
         if 'BODY[]' in fetch.items:
             self._cache.add_body_sections_by_uid(self._mailbox, uid, fetch.items['BODY[]'])
             want_commit = True
