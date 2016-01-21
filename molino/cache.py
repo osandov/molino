@@ -188,16 +188,11 @@ class Cache:
 
     def add_message_with_envelope(self, gm_msgid, envelope, *,
                                   bodystructure=None, flags):
-        def decode_header(b, errors='strict'):
+        def decode_header(b):
             if b is None:
                 return None
-            strings = []
-            for decoded, charset in email.header.decode_header(b.decode('ascii', errors=errors)):
-                if charset:
-                    strings.append(decoded.decode(charset, errors=errors))
-                else:
-                    strings.append(decoded)
-            return ''.join(strings)
+            # TODO: be robust to errors
+            return str(email.header.make_header(email.header.decode_header(b.decode('ascii'))))
         def envelope_addrs(addrs):
             if not addrs:
                 return None
