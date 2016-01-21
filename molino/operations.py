@@ -9,10 +9,10 @@ import ssl
 import sys
 
 from molino.callbackstack import CallbackStack, callback_stack
+from molino.imap import decode_mailbox_name
 import molino.imap.parser
 import molino.imap.formatter
 import molino.imap as imap
-import molino.model as model
 from molino.view import StatusLevel
 from molino.seque import SequenceQueue
 import molino.signalfd as signalfd
@@ -81,10 +81,10 @@ class MainOperation(Operation):
     anything additional that is registered.
     """
 
-    def __init__(self, config, model, view):
+    def __init__(self, config, cache, view):
         super().__init__(None)
         self._config = config
-        self._model = model
+        self._cache = cache
         self._view = view
 
         self._quit = False
@@ -130,7 +130,7 @@ class MainSubOperation(Operation):
     def __init__(self, main, parent=None):
         super().__init__(parent if parent else main)
         self._main = main
-        self._model = self._main._model
+        self._cache = self._main._cache
 
     def update_status(self, msg, level):
         """Display a status update to the user."""
@@ -168,7 +168,7 @@ class _IMAPManagerOperation(MainSubOperation):
         self._workqueue = IMAPWorkqueueOperation(self)
         self._workqueue.start()
         self._workqueue.refresh_mailbox_list()
-        self._workqueue.select_mailbox(self._model.get_mailbox(b'INBOX'))
+        self._workqueue.select_mailbox('INBOX')
 
     def done(self):
         for attr_name in dir(self):
@@ -197,17 +197,19 @@ class _IMAPManagerOperation(MainSubOperation):
         return True
 
     @_view_event_handler('open_message')
-    def _handle_open_message(self, mailbox, uid):
+    def _handle_open_message(self, mailbox, uid, fetch_bodystructure):
         if self._workqueue:
             self._workqueue.select_mailbox(mailbox)
-            self._workqueue.fetch_bodystructure(uid)
+            if fetch_bodystructure:
+                self._workqueue.fetch_bodystructure(uid)
         return True
 
     @_view_event_handler('read_body_sections')
     def _handle_open_body_sections(self, mailbox, uid, sections):
         if self._workqueue:
             self._workqueue.select_mailbox(mailbox)
-            self._workqueue.fetch_body_sections(uid, sections)
+            if sections:
+                self._workqueue.fetch_body_sections(uid, sections)
         return True
 
 
@@ -319,17 +321,12 @@ class IMAPWorkqueueOperation(MainSubOperation):
         self._work_added()
 
     def fetch_bodystructure(self, uid):
-        message = self.selected.get_message(uid)
-        if not message.bodystructure:
-            self._queue.append(Work(Work.Type.fetch_bodystructure, uid))
-            self._work_added()
+        self._queue.append(Work(Work.Type.fetch_bodystructure, uid))
+        self._work_added()
 
     def fetch_body_sections(self, uid, sections):
-        message = self.selected.get_message(uid)
-        sections = [s for s in sections if not message.have_body_section(s)]
-        if sections:
-            self._queue.append(Work(Work.Type.fetch_body_sections, uid, sections))
-            self._work_added()
+        self._queue.append(Work(Work.Type.fetch_body_sections, uid, sections))
+        self._work_added()
 
 
 class _IMAPConnectionOperation(MainSubOperation):
@@ -467,7 +464,7 @@ class _IMAPConnectionOperation(MainSubOperation):
         while True:
             try:
                 n = self._sock.recv_into(self._recv_buf)
-                #  logging.debug('S: %s' % self._recv_buf[:n])
+                # logging.debug('S: %s' % self._recv_buf[:n])
                 if n == 0:
                     self.update_status('Disconnected', StatusLevel.error)
                     self.dec_pending()
@@ -514,7 +511,7 @@ class _IMAPConnectionOperation(MainSubOperation):
             end = conts[0] if conts else len(send_buf)
             try:
                 n = self._sock.send(send_buf[self._send_pos:end])
-                #  logging.debug('C: %s' % send_buf[self._send_pos:self._send_pos + n])
+                # logging.debug('C: %s' % send_buf[self._send_pos:self._send_pos + n])
                 self._send_pos += n
                 if self._send_pos >= len(send_buf):
                     self._send_queue.popleft()
@@ -742,7 +739,7 @@ class _IMAPOperation(MainSubOperation):
         self._imap = imap
         self._workqueue = self._imap._parent
         self._main = self._imap._main
-        self._model = self._main._model
+        self._cache = self._main._cache
 
     def start(self):
         super().start()
@@ -874,7 +871,7 @@ class IMAPNotAuthenticatedState(_IMAPStateOperation):
 
 class _IMAPAuthenticatedState(_IMAPStateOperation):
     """
-    IMAP Authenticated state: immediately attempts to select a mailbox.
+    IMAP Authenticated state.
     """
 
     def __init__(self, imap):
@@ -887,6 +884,10 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
         super().start()
         self.inc_pending()  # Until we change state
         self._process_work()
+
+    def done(self):
+        self._cache.commit()
+        super().done()
 
     def _process_work(self):
         if self._workqueue.have_work():
@@ -901,10 +902,11 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
                 list_op.start()
             elif work.type == Work.Type.select:
                 self._mailbox, = work.args
-                self.update_status('Selecting %s...' % self._mailbox.name_decoded,
+                encoded_name = self._cache.mailbox_encoded_name(self._mailbox)
+                self.update_status('Selecting %s...' % self._mailbox,
                                    StatusLevel.info)
                 self._enqueue_cmd(lambda op: self._handle_tagged_select(op, work),
-                                  'EXAMINE', self._mailbox.name)
+                                  'EXAMINE', encoded_name)
             else:
                 assert False, work.type
         else:
@@ -949,17 +951,17 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
 
     @_untagged_handler('RECENT')
     def _handle_recent(self, resp):
-        self._mailbox.recent = resp.data
+        self._cache.update_mailbox(self._mailbox, recent=resp.data)
         return True
 
     @_untagged_handler('FLAGS')
     def _handle_flags(self, resp):
-        self._mailbox.flags = resp.data
+        self._cache.update_mailbox(self._mailbox, attributes=resp.data)
         return True
 
     @_untagged_handler('EXISTS')
     def _handle_exists(self, resp):
-        self._mailbox.exists = resp.data
+        self._cache.update_mailbox(self._mailbox, exists=resp.data)
         return True
 
     @_untagged_handler('OK')
@@ -974,12 +976,12 @@ class IMAPListOperation(_IMAPSubOperation):
     def __init__(self, state, selected=None):
         super().__init__(state)
         self._list_status = self._imap.have_capability('LIST-STATUS')
-        self._missing = {mailbox.name for mailbox in self._model.mailboxes()}
         self._selected = set() if selected is None else selected
 
     def start(self):
         super().start()
         self.update_status('Refreshing mailbox list...', StatusLevel.info)
+        self._cache.create_temp_mailbox_list()
         if self._list_status:
             status_items = ['MESSAGES', 'UNSEEN']
         else:
@@ -987,25 +989,27 @@ class IMAPListOperation(_IMAPSubOperation):
         self._enqueue_cmd(self._handle_tagged_list, 'LIST', b'', b'*',
                           status_items=status_items)
 
+    def done(self):
+        self._cache.drop_temp_mailbox_list()
+        self._cache.commit()
+        super().done()
+
     @_untagged_handler('LIST')
     def _handle_list(self, resp):
-        attributes, delimiter, mailbox_name = resp.data
-        try:
-            self._missing.remove(mailbox_name)
-        except KeyError:
-            pass
-        try:
-            mailbox = self._model.get_mailbox(mailbox_name)
-            mailbox.delimiter = delimiter
-            mailbox.attributes = attributes
-        except KeyError:
-            mailbox = model.Mailbox(self._model, mailbox_name, delimiter,
-                                    attributes)
-            self._model.add_mailbox(mailbox)
+        attributes, delimiter, raw_name = resp.data
+        name = decode_mailbox_name(raw_name)
+        if self._cache.has_mailbox(name):
+            self._cache.update_mailbox(name, delimiter=delimiter,
+                                       attributes=attributes)
+        else:
+            self._cache.add_mailbox(name, raw_name, delimiter=delimiter,
+                                    attributes=attributes)
+        self._cache.add_listing_mailbox(name)
         if not self._list_status:
-            if mailbox.name not in self._selected and mailbox.can_select():
-                self._enqueue_cmd(self._handle_tagged_status, 'STATUS',
-                                  mailbox_name, 'MESSAGES', 'UNSEEN')
+            assert False, "TODO"  # XXX
+            #  if mailbox.name not in self._selected and mailbox.can_select():
+                #  self._enqueue_cmd(self._handle_tagged_status, 'STATUS', name,
+                                  #  'MESSAGES', 'UNSEEN')
         return True
 
     @_untagged_handler('STATUS')
@@ -1015,19 +1019,14 @@ class IMAPListOperation(_IMAPSubOperation):
             # response for the selected mailbox. We want the EXISTS/EXPUNGE
             # responses to take precedence, so ignore it.
             return True
-        mailbox = self._model.get_mailbox(resp.data.mailbox)
-        for key, value in resp.data.status.items():
-            if key == 'MESSAGES':
-                mailbox.exists = value
-            elif key == 'UNSEEN':
-                mailbox.set_num_unseen(value)
+        name = decode_mailbox_name(resp.data.mailbox)
+        self._cache.update_mailbox(name, exists=resp.data.status['MESSAGES'],
+                                   unseen=resp.data.status['UNSEEN'])
         return True
 
     def _handle_tagged_list(self, resp):
         if resp.type == 'OK':
-            for mailbox_name in self._missing:
-                assert mailbox_name != b'INBOX'
-                self._model.delete_mailbox(mailbox_name)
+            self._cache.delete_unlisted_mailboxes()
             self.update_status('Refreshed mailbox list', StatusLevel.info)
         else:
             self._bad_response(resp)
@@ -1056,11 +1055,11 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def start(self):
         super().start()
         self.inc_pending()  # Until we change state
-        self.update_status('Selected %s' % self._mailbox.name_decoded,
-                           StatusLevel.info)
-        self._mailbox.uids = [None] * (self._mailbox.exists + 1)
-        if self._mailbox.exists:
-            self._seque.put(1, self._mailbox.exists)
+        self.update_status('Selected %s' % self._mailbox, StatusLevel.info)
+        exists = self._cache.get_mailbox_exists(self._mailbox)
+        self._uids = [None] * (exists + 1)
+        if exists:
+            self._seque.put(1, exists)
         unseen_op = IMAPPopulateUnseenOperation(self)
         unseen_op.callback = self._unseen_done
         unseen_op.start()
@@ -1071,7 +1070,9 @@ class _IMAPSelectedState(_IMAPStateOperation):
                                StatusLevel.error)
             self._gmail_hack(op.bad)
         else:
-            self._mailbox.set_unseen(op.unseen)
+            self._unseen = op.unseen
+            self._cache.update_mailbox(self._mailbox, unseen=len(self._unseen))
+            self._cache.commit()
             self._process_work()
         self.dec_pending()
 
@@ -1079,7 +1080,7 @@ class _IMAPSelectedState(_IMAPStateOperation):
         if self._workqueue.have_work():
             work = self._workqueue.get_work()
             if work.type == Work.Type.refresh_list:
-                list_op = IMAPListOperation(self, {self._mailbox.name})
+                list_op = IMAPListOperation(self, {self._mailbox})
                 list_op.callback = lambda op: self._list_done(op, work)
                 list_op.start()
             elif work.type == Work.Type.close:
@@ -1171,9 +1172,19 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def _fetch_new_messages(self):
         assert not self._fetching
         self._fetching = True
-        self.update_status('Fetching %s (%d)' % (self._mailbox.name_decoded, len(self._seque)),
+        self.update_status('Fetching %s (%d)' % (self._mailbox, len(self._seque)),
                            StatusLevel.info)
-        fetch_op = GmailFetchMessagesOperation(self, self._seque.get(150))
+
+        seq_set = self._seque.get(150)
+        if isinstance(seq_set[-1], int):
+            last_seq = seq_set[-1]
+        else:
+            last_seq = seq_set[-1][1]
+        if last_seq == len(self._uids) - 1:
+            last_uid = -1
+        else:
+            last_uid = self._uids[last_seq + 1]
+        fetch_op = GmailFetchMessagesOperation(self, seq_set, last_uid)
         fetch_op.callback = self._fetch_new_done
         fetch_op.start()
 
@@ -1202,59 +1213,72 @@ class _IMAPSelectedState(_IMAPStateOperation):
 
     @_untagged_handler('RECENT')
     def _handle_recent(self, resp):
-        self._mailbox.recent = resp.data
+        self._cache.update_mailbox(self._mailbox, recent=resp.data)
+        if not self._fetching:
+            self._cache.commit()
         return True
 
     @_untagged_handler('EXISTS')
     def _handle_exists(self, resp):
         exists = resp.data
-        assert exists >= self._mailbox.exists
-        if exists > self._mailbox.exists:
-            self._seque.put(self._mailbox.exists + 1, exists)
-            self._mailbox.uids.extend([None] * (exists - self._mailbox.exists))
-            self._mailbox.exists = exists
-            assert len(self._mailbox.uids) - 1 == self._mailbox.exists
+        old_exists = len(self._uids) - 1
+        assert exists >= old_exists
+        if exists > old_exists:
+            self._seque.put(old_exists + 1, exists)
+            self._uids.extend([None] * (exists - old_exists))
+            self._cache.update_mailbox(self._mailbox, exists=exists)
+            if not self._fetching:
+                self._cache.commit()
         return True
 
     @_untagged_handler('EXPUNGE')
     def _handle_expunge(self, resp):
-        assert resp.data <= self._mailbox.exists
-        uid = self._mailbox.uids.pop(resp.data)
-        self._mailbox.exists -= 1
-        assert len(self._mailbox.uids) - 1 == self._mailbox.exists
+        old_exists = len(self._uids) - 1
+        assert resp.data <= old_exists
+        uid = self._uids.pop(resp.data)
+        self._cache.update_mailbox(self._mailbox, exists=old_exists - 1)
         if uid is None:
             # TODO: garbage collection of UIDs that we don't fetch before they
             # get expunged.
             assert False
         else:
-            self._mailbox.delete_message(uid)
+            self._cache.delete_mailbox_uid(self._mailbox, uid)
+        if not self._fetching:
+            self._cache.commit()
         self._seque.delete(resp.data)
         return True
 
     @_untagged_handler('FETCH')
     def _handle_fetch(self, resp):
         fetch = resp.data
+        want_commit = False
+        if 'UID' in fetch.items:
+            self._uids[fetch.msg] = fetch.items['UID']
         try:
-            uid = fetch.items['UID']
+            uid = self._uids[fetch.msg]
         except KeyError:
-            try:
-                uid = self._mailbox.uids[fetch.msg]
-            except KeyError:
-                # XXX
-                return True
-        message = self._mailbox.get_message(uid)
-        if 'ENVELOPE' in fetch.items:
-            message.envelope = fetch.items['ENVELOPE']
+            # XXX
+            return True
+        update = {}
         if 'BODYSTRUCTURE' in fetch.items:
-            message.bodystructure = fetch.items['BODYSTRUCTURE']
+            update['bodystructure'] = fetch.items['BODYSTRUCTURE']
         if 'FLAGS' in fetch.items:
-            message.flags = fetch.items['FLAGS']
-            if '\\Seen' in message.flags:
-                self._mailbox.remove_unseen(uid)
+            update['flags'] = fetch.items['FLAGS']
+            old_unseen = len(self._unseen)
+            if '\\Seen' in fetch.items['FLAGS']:
+                self._unseen.discard(uid)
             else:
-                self._mailbox.add_unseen(uid)
+                self._unseen.add(uid)
+            if len(self._unseen) != old_unseen:
+                update['unseen'] = len(self._unseen)
         if 'BODY[]' in fetch.items:
-            message.add_body_sections(fetch.items['BODY[]'])
+            self._cache.add_body_sections_by_uid(self._mailbox, uid, fetch.items['BODY[]'])
+            want_commit = True
+        if update:
+            self._cache.update_message_by_uid(self._mailbox, uid, **update)
+            want_commit = True
+        if want_commit and not self._fetching:
+            self._cache.commit()
         return True
 
 
@@ -1283,21 +1307,27 @@ class IMAPPopulateUnseenOperation(_IMAPSubOperation):
 
 
 class GmailFetchMessagesOperation(_IMAPSubOperation):
-    def __init__(self, state, seq_set):
+    def __init__(self, state, seq_set, last_uid):
         super().__init__(state)
         self._mailbox = state._mailbox
         self._fetching_uids = False
         self._fetching_gm_msgids = False
+        self._fetching_envelopes = False
         self._seq_set = seq_set
+        self._last_uid = last_uid
         self.bad = None
 
     def start(self):
         super().start()
         self._fetching_uids = True
-        self._new_uids = set()
-        self._old_uids = set()
+        self._cache.create_temp_fetching_table(self._mailbox)
         self._enqueue_cmd(self._handle_tagged_fetch_uids,
                           'FETCH', self._seq_set, 'UID')
+
+    def done(self):
+        self._cache.drop_temp_fetching_table()
+        self._cache.commit()
+        super().done()
 
     def _handle_tagged_fetch_uids(self, resp):
         if resp.type == 'BAD':
@@ -1306,20 +1336,17 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
             return True
         elif resp.type != 'OK':
             assert False, "TODO"
-        new_uids = self._new_uids
-        old_uids = self._old_uids
-        del self._new_uids, self._old_uids
+        self._cache.delete_fetching_missing(self._last_uid)
+        old, new = self._cache.get_fetching_old_new_uids()
         self._fetching_uids = False
-        if new_uids:
+        if new:
             self._fetching_gm_msgids = True
-            seq_set = imap.sequence_set(new_uids)
-            self._new_gm_msgids = set()
+            seq_set = imap.sequence_set(new)
             self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
-                              'FETCH', seq_set, 'X-GM-MSGID', 'FLAGS')
-        if old_uids:
-            seq_set = imap.sequence_set(old_uids)
-            self._enqueue_cmd(self._handle_tagged,
-                              'FETCH', seq_set, 'FLAGS')
+                              'FETCH', seq_set, 'X-GM-MSGID')
+        if old:
+            seq_set = imap.sequence_set(old)
+            self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS')
         self.dec_pending()
         return True
 
@@ -1330,13 +1357,28 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
             return True
         elif resp.type != 'OK':
             assert False, "TODO"
-        new_gm_msgids = self._new_gm_msgids
-        del self._new_gm_msgids
+        old, new = self._cache.get_fetching_old_new_gm_msgids()
         self._fetching_gm_msgids = False
-        if new_gm_msgids:
-            seq_set = imap.sequence_set(new_gm_msgids)
-            self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set,
-                              'ENVELOPE')
+        if new:
+            self._fetching_envelopes = True
+            self._new_gm_msgids = new
+            seq_set = imap.sequence_set(new)
+            self._enqueue_cmd(self._handle_tagged_fetch_envelopes,
+                              'FETCH', seq_set, 'ENVELOPE', 'FLAGS')
+        if old:
+            seq_set = imap.sequence_set(old)
+            self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS')
+        self.dec_pending()
+        return True
+
+    def _handle_tagged_fetch_envelopes(self, resp):
+        if resp.type == 'BAD':
+            self.bad = resp
+            self.dec_pending()
+            return True
+        elif resp.type != 'OK':
+            assert False, "TODO"
+        self._cache.add_fetching_uids()
         self.dec_pending()
         return True
 
@@ -1351,33 +1393,24 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
     def _handle_fetch(self, resp):
         fetch = resp.data
         if self._fetching_uids:
-            uid = fetch.items['UID']
-            self._mailbox.uids[fetch.msg] = uid
-            if self._mailbox.contains_message(uid):
-                self._old_uids.add(fetch.msg)
-            else:
-                self._new_uids.add(fetch.msg)
-            return True
+            self._cache.add_fetching_uid(fetch.msg, fetch.items['UID'])
         elif self._fetching_gm_msgids:
-            uid = self._mailbox.uids[fetch.msg]
-            assert uid is not None
-            msgid = fetch.items['X-GM-MSGID']
-            try:
-                message = self._model.get_gmail_message(msgid)
-            except KeyError:
-                message = model.Message(self._model, msgid)
-                self._model.add_gmail_message(message)
-            if not message.envelope:
-                self._new_gm_msgids.add(fetch.msg)
-            self._mailbox.add_message(uid, message)
-            # _IMAPSelectedState handles other FETCH items
-            return False
+            gm_msgid = fetch.items.pop('X-GM-MSGID')
+            self._cache.add_fetching_gm_msgid(fetch.msg, gm_msgid)
+        elif self._fetching_envelopes and 'ENVELOPE' in fetch.items:
+            envelope = fetch.items.pop('ENVELOPE')
+            flags = fetch.items.pop('FLAGS')
+            gm_msgid = self._new_gm_msgids[fetch.msg]
+            self._cache.add_message_with_envelope(gm_msgid, envelope, flags=flags)
+        # _IMAPSelectedState handles other FETCH items
+        return len(fetch.items) == 0
 
 
 class IMAPIdleOperation(_IMAPSubOperation):
     def __init__(self, state):
         super().__init__(state)
         self._mailbox = state._mailbox
+        self._uids = state._uids
         self._got_continue_req = False
         self._done = False
         self._refresh = False
@@ -1402,8 +1435,9 @@ class IMAPIdleOperation(_IMAPSubOperation):
 
     @_untagged_handler('EXISTS')
     def _handle_exists(self, resp):
-        if resp.data > self._mailbox.exists:
+        old_exists = len(self._uids) - 1
+        if resp.data > old_exists:
             self._workqueue.cancel_wait(self._idle_done)
             self._idle_done()
-        # _IMAPSelectedState needs to update the model.
+        # _IMAPSelectedState needs to update the cache.
         return False

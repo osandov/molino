@@ -1,7 +1,5 @@
+import bisect
 import curses
-import logging
-
-from molino.sorteddict import SortedDict
 
 
 class ScrollWidget:
@@ -98,9 +96,8 @@ class ScrollWidget:
                             0, 0, nlines - 1, ncols - 1)
 
 
-class MenuWidget:
-    def __init__(self, formatter, window, color_scheme, sort_key=None):
-        self._formatter = formatter
+class DBViewWidget:
+    def __init__(self, window, color_scheme):
         self._window = window
         if self._window:
             self._window.scrollok(True)
@@ -111,32 +108,214 @@ class MenuWidget:
             self._ncols = 80
         self._color_scheme = color_scheme
 
-        self.dict = SortedDict(sort_key=sort_key)
+        self._displayed = []
         self._indicator = None
         self._indicator_pos = None
+        for i, row in enumerate(self.first_n(self._nlines)):
+            key = self.row_to_key(row)
+            if i == 0:
+                self._indicator = key
+                self._indicator_pos = 0
+            self._displayed.append(key)
+            self.draw_record(i, row)
+        self._stay_top = False
+        self.refresh()
 
-    def refresh(self):
-        if self._window:
-            self._window.refresh()
+    def row_to_key(self, row):
+        raise NotImplementedError
+
+    def max_key(self):
+        raise NotImplementedError
+
+    def prev_key(self, key):
+        raise NotImplementedError
+
+    def next_key(self, key):
+        raise NotImplementedError
+
+    def skip_forward(self, key, n):
+        raise NotImplementedError
+
+    def skip_backward(self, key, n):
+        raise NotImplementedError
+
+    def first_n(self, n):
+        raise NotImplementedError
+
+    def prev_n(self, key, n):
+        raise NotImplementedError
+
+    def next_n(self, key, n):
+        raise NotImplementedError
+
+    def draw_key(self, line, key):
+        raise NotImplementedError
+
+    def draw_record(self, line, row):
+        raise NotImplementedError
+
+    def add_record(self, key):
+        if not self._displayed:
+            self._indicator = key
+            self._indicator_pos = 0
+            line = 0
+        else:
+            line = bisect.bisect_left(self._displayed, key)
+            if line == 0:
+                if self._stay_top:
+                    assert self._indicator_pos == 0
+                    assert self._indicator == self._displayed[0]
+                    self._indicator = key
+                    self.draw_key(0, self._displayed[0])
+                else:
+                    if self._indicator_pos == self._nlines - 1:
+                        # Offscreen, don't need to do anything.
+                        return
+                    key = self.prev_key(self._displayed[0])
+                    self._indicator_pos += 1
+            elif line <= self._indicator_pos:
+                assert not self._stay_top
+                if self._indicator_pos == self._nlines - 1:
+                    del self._displayed[0]
+                    line -= 1
+                    self._indicator_pos -= 1
+                    self._win_scroll()
+                self._indicator_pos += 1
+            elif line >= self._nlines:
+                # Offscreen, don't need to do anything.
+                return
+        self._displayed.insert(line, key)
+        if len(self._displayed) > self._nlines:
+            del self._displayed[-1]
+        self._win_move(line, 0)
+        self._win_insertln()
+        self.draw_key(line, key)
+
+    def delete_record(self, key):
+        line = bisect.bisect_left(self._displayed, key)
+        if line == 0 and self._displayed[0] != key:
+            line = -1
+        if line < self._indicator_pos:
+            if self._indicator_pos == 0:
+                # Can't scroll up, don't need to do anything else.
+                return
+            self._indicator_pos -= 1
+            if line >= 0:
+                del self._displayed[line]
+                self._win_move(line, 0)
+                self._win_deleteln()
+            else:
+                del self._displayed[0]
+                self._win_scroll()
+        elif line > self._indicator_pos:
+            if line == len(self._displayed):
+                # Offscreen, don't need to do anything else.
+                return
+            del self._displayed[line]
+            self._win_move(line, 0)
+            self._win_deleteln()
+        else:
+            del self._displayed[line]
+            self._win_move(line, 0)
+            self._win_deleteln()
+            self._indicator = self.next_key(self._indicator)
+            if self._indicator is None:
+                self._indicator = self.max_key()
+                if self._indicator is None:
+                    self._indicator_pos = None
+                    return
+                else:
+                    self._indicator_pos -= 1
+            self.draw_key(self._indicator_pos, self._indicator)
+
+        if self._nlines == 1:
+            assert len(self._displayed) == 0
+            self._displayed.append(self._indicator)
+            return
+        if len(self._displayed) < self._nlines - 1:
+            return
+        # Deleting the entry left a gap at the bottom. Fill it in if we can.
+        key2 = self.next_key(self._displayed[-1])
+        if key2:
+            self._displayed.append(key2)
+            self.draw_key(self._nlines - 1, key2)
+        else:
+            key2 = self.prev_key(self._displayed[0])
+            if key2:
+                self._indicator_pos += 1
+                self._win_scroll(-1)
+                self._displayed.insert(0, key2)
+                self.draw_key(0, key2)
+
+    def update_record(self, key):
+        line = bisect.bisect_left(self._displayed, key)
+        if line < len(self._displayed) and self._displayed[line] == key:
+            self.draw_key(line, key)
+
+    def move_indicator(self, delta):
+        self._stay_top = False
+        if not self._displayed or delta == 0:
+            return
+
+        old_indicator = self._indicator
+        old_indicator_pos = self._indicator_pos
+        if delta > 0:
+            self._indicator, delta = self.skip_forward(self._indicator, delta)
+        else:
+            self._indicator, delta = self.skip_backward(self._indicator, -delta)
+            delta = -delta
+        if delta == 0:
+            return
+        self._indicator_pos += delta
+        self.draw_key(old_indicator_pos, old_indicator)
+
+        if self._indicator_pos < 0:
+            lines = -self._indicator_pos
+            self._indicator_pos = 0
+            self._win_scroll(-lines)
+            new_displayed = []
+            for i, row in enumerate(self.next_n(self._indicator, lines)):
+                new_displayed.append(self.row_to_key(row))
+                self.draw_record(i, row)
+            new_displayed.extend(self._displayed[:self._nlines - lines])
+            self._displayed = new_displayed
+        elif self._indicator_pos >= self._nlines:
+            lines = self._indicator_pos - self._nlines + 1
+            self._indicator_pos = self._nlines - 1
+            self._win_scroll(lines)
+            self._displayed = self._displayed[lines:]
+            self._displayed.extend([None] * lines)
+            for i, row in enumerate(self.prev_n(self._indicator, lines)):
+                self._displayed[self._nlines - 1 - i] = self.row_to_key(row)
+                self.draw_record(self._nlines - 1 - i, row)
+        else:
+            self.draw_key(self._indicator_pos, self._indicator)
 
     def resize(self, nlines, ncols):
         if self._window:
             self._window.resize(nlines, ncols)
         self._resize(nlines, ncols)
+        self.refresh()
 
     def _resize(self, nlines, ncols):
         old_nlines = self._nlines
         self._nlines, self._ncols = nlines, ncols
-        if len(self.dict) > 0:
-            if self._nlines < old_nlines:
-                if self._indicator_pos >= self._nlines:
-                    self._indicator_pos = self._nlines - 1
+        self._win_erase()
+        if self._displayed:
+            if self._nlines < old_nlines and self._indicator_pos >= self._nlines:
+                lines = self._indicator_pos - self._nlines + 1
+                key = self._displayed[lines]
+                self._indicator_pos = self._nlines - 1
             elif self._nlines > old_nlines:
-                index = self.dict.index(self._indicator)
-                first_index = index - self._indicator_pos
-                new_lines = self._nlines - old_nlines
-                self._indicator_pos += min(new_lines, first_index)
-        self.redraw()
+                key, lines = self.skip_backward(self._displayed[0],
+                                                self._nlines - old_nlines)
+                self._indicator_pos += lines
+            else:
+                key = self._displayed[0]
+            self._displayed.clear()
+            for i, row in enumerate(self.next_n(key, self._nlines)):
+                self._displayed.append(self.row_to_key(row))
+                self.draw_record(i, row)
 
     def setwin(self, window):
         old_window = self._window
@@ -146,157 +325,16 @@ class MenuWidget:
             self._resize(*self._window.getmaxyx())
         return old_window
 
-    def get_indicator(self):
-        if len(self.dict) > 0:
-            return self._indicator, self.dict[self._indicator]
+    def hide(self):
+        return self.setwin(None)
 
-    def add_entry(self, key, value):
-        first = len(self.dict) == 0
-        self.dict[key] = value
-        if first:
-            self._indicator = key
-            self._indicator_pos = 0
-            line = self._indicator_pos
-        else:
-            indicator_index = self.dict.index(self._indicator)
-            index = self.dict.index(key)
+    def show(self, window):
+        self.setwin(window)
+        self._window.refresh()
 
-            if index < indicator_index:
-                if self._indicator_pos == self._nlines - 1:
-                    self._win_scroll()
-                    self._indicator_pos -= 1
-                self._indicator_pos += 1
-                line = self._indicator_pos + index - indicator_index
-                if line < 0:
-                    key = self.dict.ith_key(indicator_index - self._indicator_pos)
-                    line = 0
-                self._win_move(line, 0)
-                self._win_insertln()
-            else:
-                line = self._indicator_pos + index - indicator_index
-                if line >= self._nlines:
-                    # Offscreen, don't need to draw anything.
-                    return
-                else:
-                    self._win_move(line, 0)
-                    self._win_insertln()
-        self._draw_entry(key, self.dict[key], line)
-
-    def del_entry(self, key):
-        if len(self.dict) == 1:
-            del self.dict[key]
-            self._win_move(0, 0)
-            self._win_clrtoeol()
-            self._indicator = None
-            self._indicator_pos = None
-            return
-
-        indicator_index = self.dict.index(self._indicator)
-        index = self.dict.index(key)
-        del self.dict[key]
-        line = self._indicator_pos + index - indicator_index
-
-        if index < indicator_index:
-            if self._indicator_pos == 0:
-                # Can't scroll up, don't need to do anything else.
-                return
-            indicator_index -= 1
-            self._indicator_pos -= 1
-            if line >= 0:
-                self._win_move(line, 0)
-                self._win_deleteln()
-            else:
-                self._win_scroll()
-        elif index > indicator_index:
-            if line >= self._nlines:
-                # Offscreen, don't need to do anything else.
-                return
-            self._win_move(line, 0)
-            self._win_deleteln()
-        else:
-            self._win_move(line, 0)
-            self._win_deleteln()
-            try:
-                self._indicator = self.dict.next_key(self._indicator)
-            except IndexError:
-                self._indicator = self.dict.max_key()
-                indicator_index -= 1
-                self._indicator_pos -= 1
-            self._draw_entry(self._indicator, self.dict[self._indicator],
-                             self._indicator_pos)
-
-        # Deleting the entry left a gap at the bottom. Fill it in if we can.
-        index2 = indicator_index + self._nlines - self._indicator_pos - 1
-        if index2 < len(self.dict):
-            key, value = self.dict.ith_item(index2)
-            self._draw_entry(key, value, self._nlines - 1)
-        else:
-            index2 = indicator_index - self._indicator_pos - 1
-            if index2 >= 0:
-                self._indicator_pos += 1
-                self._win_scroll(-1)
-                key, value = self.dict.ith_item(index2)
-                self._draw_entry(key, value, 0)
-
-    def redraw_entry(self, key):
-        indicator_index = self.dict.index(self._indicator)
-        index = self.dict.index(key)
-        line = self._indicator_pos + index - indicator_index
-        if not 0 <= line < self._nlines:
-            return
-        self._draw_entry(key, self.dict[key], line)
-
-    def move_indicator(self, delta):
-        if len(self.dict) == 0:
-            return
-        index = self.dict.index(self._indicator)
-        if delta > 0:
-            delta = min(len(self.dict) - 1 - index, delta)
-        else:
-            delta = -min(index, -delta)
-        if delta == 0:
-            return
-
-        old_indicator = self._indicator
-        old_indicator_pos = self._indicator_pos
-        index += delta
-        self._indicator = self.dict.ith_key(index)
-        self._indicator_pos += delta
-        self._draw_entry(old_indicator, self.dict[old_indicator],
-                         old_indicator_pos)
-        if self._indicator_pos < 0:
-            lines = -self._indicator_pos
-            self._indicator_pos = 0
-            self._win_scroll(-lines)
-            for i in range(lines):
-                key, value = self.dict.ith_item(index + i)
-                self._draw_entry(key, value, i)
-        elif self._indicator_pos >= self._nlines:
-            lines = self._indicator_pos - self._nlines + 1
-            self._indicator_pos = self._nlines - 1
-            self._win_scroll(lines)
-            for i in range(lines):
-                key, value = self.dict.ith_item(index - i)
-                self._draw_entry(key, value, self._nlines - 1 - i)
-        else:
-            self._draw_entry(self._indicator, self.dict[self._indicator],
-                             self._indicator_pos)
-
-    def redraw(self):
-        if len(self.dict) == 0:
-            self._win_erase()
-            return
-
-        indicator_index = self.dict.index(self._indicator)
-        first_index = indicator_index - self._indicator_pos
-        lines_after = self._nlines - 1 - self._indicator_pos
-        last_index = min(indicator_index + lines_after, len(self.dict) - 1)
-
-        self._win_erase()
-        for line, i in enumerate(range(first_index, last_index + 1)):
-            # TODO: SortedDict iterators starting at a given position?
-            key, value = self.dict.ith_item(i)
-            self._draw_entry(key, value, line)
+    def refresh(self):
+        if self._window:
+            self._window.refresh()
 
     def _win_clrtoeol(self):
         if self._window:
@@ -321,11 +359,3 @@ class MenuWidget:
     def _win_scroll(self, lines=1):
         if self._window:
             self._window.scroll(lines)
-
-    def _draw_entry(self, key, value, line):
-        if self._window:
-            self._window.move(line, 0)
-            self._window.clrtoeol()
-            self._formatter(self._window, self._color_scheme, key, value,
-                            key == self._indicator)
-            assert self._window.getyx()[0] == line

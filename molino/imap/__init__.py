@@ -1,3 +1,12 @@
+def decode_mailbox_name(name):
+    try:
+        return name.decode('imap-utf-7')
+    except UnicodeDecodeError:
+        # If the mailbox isn't valid modified UTF-7, assume it's UTF-8 and
+        # be robust to errors.
+        return name.decode('utf-8', errors='backslashreplace')
+
+
 def sequence_set(ids):
     """
     Convert a list of IDs into a sequence set, that is, a list comprising

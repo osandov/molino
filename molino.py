@@ -7,9 +7,9 @@ import sqlite3
 import sys
 import traceback
 
+import molino.cache
 import molino.config
 import molino.imap.parser
-import molino.model
 import molino.operations
 import molino.view
 
@@ -19,6 +19,7 @@ if __name__ == '__main__':
         config = molino.config.parse_config(f)
 
     logging.basicConfig(filename='/tmp/molino.log', level=logging.DEBUG)
+    cache = None
     try:
         # Curses
         stdscr = curses.initscr()
@@ -39,16 +40,17 @@ if __name__ == '__main__':
         curses.use_default_colors()
 
         db = sqlite3.connect('/tmp/molino.db')
-        db.row_factory = sqlite3.Row
-        model = molino.model.Model(db)
-        view = molino.view.View(config, stdscr, model)
-        main = molino.operations.MainOperation(config, model, view)
+        cache = molino.cache.Cache(db)
+        view = molino.view.View(config, stdscr, cache)
+        main = molino.operations.MainOperation(config, cache, view)
         main.start()
     except molino.imap.parser.IMAPParseError as e:
         traceback.print_exc()
         print(repr(e.buf), file=sys.stderr)
         print(' ' * (len(repr(e.buf[:e.cursor])) - 2) + '^', file=sys.stderr)
     finally:
+        if cache:
+            cache.close()
         stdscr.keypad(False)
         curses.nocbreak()
         curses.echo()

@@ -8,6 +8,6 @@ test:
 
 .PHONY: coverage
 coverage:
-	coverage3 run --source=molino/ -m unittest discover tests/
+	coverage3 run --source=molino/ -m unittest discover tests/ || true
 	coverage3 report
 	coverage3 html

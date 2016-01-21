@@ -2,16 +2,16 @@ import base64
 import collections
 import curses
 import email.header
+import email.utils
 import enum
 import locale
-import logging
 import math
 import quopri
 import re
 
+from molino.cache import mailbox_sort_key, convert_addrs, convert_bodystructure, convert_date, convert_flags
 from molino.callbackstack import callback_stack
-from molino.sorteddict import SortedDict
-from molino.widgets import MenuWidget, ScrollWidget
+from molino.widgets import DBViewWidget, ScrollWidget
 
 
 # TODO: these should be config options
@@ -40,10 +40,10 @@ class StatusLevel(enum.Enum):
 
 
 class View:
-    def __init__(self, config, stdscr, model):
+    def __init__(self, config, stdscr, cache):
         self._config = config
         self._stdscr = stdscr
-        self._model = model
+        self._cache = cache
 
         assert curses.COLORS >= 256
         self._color_scheme = {}
@@ -55,11 +55,11 @@ class View:
         self._reset_stdscr()
 
         sidebar_window = self._new_sidebar_window()
-        self._sidebar_view = _MailboxSidebar(self._config, self._model,
-                                             sidebar_window, self._color_scheme)
+        self._sidebar_view = MailboxSidebar(self._cache, sidebar_window,
+                                            self._color_scheme)
         self._index_view = None
         self._message_view = None
-        self.open_index_view(self._model.get_mailbox(b'INBOX'), False)
+        self.open_index_view('INBOX', False)
 
     def _reset_stdscr(self):
         self._stdscr.erase()
@@ -140,7 +140,6 @@ class View:
                     self._message_view.show(window)
                 elif self._index_view:
                     self._index_view.show(window)
-        self.update_status('lines = %d, cols = %d' % (curses.LINES, curses.COLS), StatusLevel.error)
 
     def handle_input(self):
         # TODO: configurable key-bindings, multiple character commands (use a
@@ -171,18 +170,17 @@ class View:
         else:
             assert self._message_view is None
             window = self._new_main_window()
-        self._index_view = _IndexView(self._config, self._model, mailbox, window,
-                                      self._color_scheme)
+        self._index_view = IndexView(self._cache, mailbox, window,
+                                     self._color_scheme)
         if event:
             self.on_select_mailbox(mailbox)
 
-    def open_message_view(self, mailbox, uid, message):
+    def open_message_view(self, mailbox, uid, gm_msgid):
         assert self._index_view is not None
         assert self._message_view is None
         window = self._index_view.hide()
-        self._message_view = _MessageView(self, mailbox, uid, message, window,
+        self._message_view = _MessageView(self, mailbox, uid, gm_msgid, window,
                                           self._color_scheme)
-        self.on_open_message(mailbox, uid)
 
     def close_message_view(self):
         assert self._index_view is not None
@@ -213,70 +211,112 @@ class View:
         return False
 
 
-class _MailboxSidebar:
-    def __init__(self, config, model, window, color_scheme):
-        self._config = config
-        self._model = model
-        self._model.on_mailboxes_add.register(self._mailboxes_add)
-        self._model.on_mailboxes_delete.register(self._mailboxes_delete)
-        self._model.on_mailbox_update.register(self._mailbox_update)
-        self._widget = MenuWidget(self._formatter, window,
-                                  color_scheme, self._mailbox_sort_key)
-        self._mailboxes_add(self._model.get_mailbox(b'INBOX'), False)
-        for mailbox in self._model.mailboxes():
-            if mailbox.name != b'INBOX':
-                self._mailboxes_add(mailbox, False)
-        self._widget.refresh()
+class MailboxSidebar(DBViewWidget):
+    def __init__(self, cache, window, color_scheme):
+        self._cache = cache
 
-    @staticmethod
-    def _mailbox_sort_key(key):
-        if key == 'Inbox':
-            # The inbox should come first
-            return 0, None, None
-        elif key.startswith('[Gmail]'):
-            # Gmail mailboxes should come last.
-            return 2, locale.strxfrm(key.casefold()), key
+        self._cache.db.create_function('mailbox_sidebar_add_mailbox', 1, self.on_add_mailbox)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER mailbox_sidebar_add_mailbox
+        AFTER INSERT ON mailboxes
+        BEGIN
+            SELECT mailbox_sidebar_add_mailbox(NEW.name);
+        END''')
+
+        self._cache.db.create_function('mailbox_sidebar_delete_mailbox', 1, self.on_delete_mailbox)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER mailbox_sidebar_delete_mailbox
+        AFTER DELETE ON mailboxes
+        BEGIN
+            SELECT mailbox_sidebar_delete_mailbox(OLD.name);
+        END''')
+
+        self._cache.db.create_function('mailbox_sidebar_update_mailbox', 1, self.on_update_mailbox)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER mailbox_sidebar_update_mailbox
+        AFTER UPDATE OF delimiter, unseen ON mailboxes
+        BEGIN
+            SELECT mailbox_sidebar_update_mailbox(NEW.name);
+        END''')
+
+        super().__init__(window, color_scheme)
+
+    def row_to_key(self, row):
+        return mailbox_sort_key(row['name'])
+
+    def max_key(self):
+        cur = self._cache.db.execute('SELECT MAX(name) FROM mailboxes')
+        return mailbox_sort_key(cur.fetchone()[0])
+
+    def prev_key(self, key):
+        cur = self._cache.db.execute('SELECT MAX(name) FROM mailboxes WHERE name<?',
+                                     (key[2],))
+        return mailbox_sort_key(cur.fetchone()[0])
+
+    def next_key(self, key):
+        cur = self._cache.db.execute('SELECT MIN(name) FROM mailboxes WHERE name>?',
+                                     (key[2],))
+        return mailbox_sort_key(cur.fetchone()[0])
+
+    def skip_forward(self, key, n):
+        row = self._cache.db.execute('''
+        SELECT MAX(name), COUNT(*) - 1 FROM (
+            SELECT name FROM mailboxes WHERE name>=? ORDER BY name ASC LIMIT ?
+        )''', (key[2], n + 1)).fetchone()
+        return mailbox_sort_key(row[0]), row[1]
+
+    def skip_backward(self, key, n):
+        row = self._cache.db.execute('''
+        SELECT MIN(name), COUNT(*) - 1 FROM (
+            SELECT name FROM mailboxes WHERE name<=? ORDER BY name DESC LIMIT ?
+        )''', (key[2], n + 1)).fetchone()
+        return mailbox_sort_key(row[0]), row[1]
+
+    def first_n(self, n):
+        return self._cache.db.execute('''
+        SELECT name, delimiter, unseen FROM mailboxes
+        ORDER BY name ASC LIMIT ?
+        ''', (n,))
+
+    def prev_n(self, key, n):
+        return self._cache.db.execute('''
+        SELECT name, delimiter, unseen FROM mailboxes
+        WHERE name<=?
+        ORDER BY name DESC LIMIT ?
+        ''', (key[2], n))
+
+    def next_n(self, key, n):
+        return self._cache.db.execute('''
+        SELECT name, delimiter, unseen FROM mailboxes
+        WHERE name>=?
+        ORDER BY name ASC LIMIT ?
+        ''', (key[2], n))
+
+    def draw_key(self, line, key):
+        row = self._cache.db.execute('''
+        SELECT delimiter, unseen FROM mailboxes WHERE name=?
+        ''', (key[2],)).fetchone()
+        self._draw_record(line, key[2] == self._indicator[2], key[2],
+                row['delimiter'], row['unseen'])
+
+    def draw_record(self, line, row):
+        self._draw_record(line, row['name'] == self._indicator[2], row['name'],
+                          row['delimiter'], row['unseen'])
+
+    def _draw_record(self, line, is_indicator, name, delimiter, unseen):
+        if not self._window:
+            return
+        self._window.move(line, 0)
+        self._window.clrtoeol()
+
+        orig_name = name
+        if name == 'INBOX':
+            name = 'Inbox'
+        if delimiter:
+            levels = name.split(chr(delimiter))
         else:
-            # Otherwise, sort alphabetically and break ties lexicographically
-            # (this can happen if there are two mailboxes which differ only in
-            # case; Gmail doesn't allow this but other mail servers might).
-            return 1, locale.strxfrm(key.casefold()), key
-
-    def hide(self):
-        return self._widget.setwin(None)
-
-    def show(self, window):
-        self._widget.setwin(window)
-        self._widget.noutrefresh()
-
-    def resize(self, nlines, ncols):
-        self._widget.resize(nlines, ncols)
-        self._widget.refresh()
-
-    def handle_input(self, view, c):
-        if c == 0x0e:  # Ctrl-N
-            self._widget.move_indicator(1)
-            self._widget.refresh()
-            return True
-        elif c == 0x0f:  # Ctrl-O
-            mailbox = self._widget.get_indicator()[1]
-            view.open_index_view(mailbox)
-            return True
-        elif c == 0x10:  # Ctrl-P
-            self._widget.move_indicator(-1)
-            self._widget.refresh()
-            return True
-        else:
-            return False
-
-    @staticmethod
-    def _formatter(window, color_scheme, key, mailbox, is_indicator):
-        if mailbox.delimiter:
-            levels = mailbox.name_decoded.split(chr(mailbox.delimiter))
-        else:
-            levels = [mailbox.name_decoded]
+            levels = [name]
         entry = ' ' * (2 * (len(levels) - 1))
-        unseen = mailbox.num_unseen()
         if unseen:
             entry += '%s (%d)' % (levels[-1], unseen)
             color = 'sidebar-new'
@@ -285,169 +325,276 @@ class _MailboxSidebar:
             color = 'sidebar'
         if is_indicator:
             color += '-indicator'
-        ncols = window.getmaxyx()[1]
-        if len(entry) > ncols:
-            entry = levels[-1][:ncols - 2] + '..'
-        entry += ' ' * max(0, ncols - len(entry))
-        window.insstr(entry, color_scheme[color])
+        if len(entry) > self._ncols:
+            entry = levels[-1][:self._ncols - 2] + '..'
+        entry += ' ' * max(0, self._ncols - len(entry))
+        self._window.insstr(entry, self._color_scheme[color])
 
-    def _mailboxes_add(self, mailbox, render=True):
-        self._widget.add_entry(mailbox.name_decoded, mailbox)
-        if render:
-            self._widget.refresh()
-        return False
+    def on_add_mailbox(self, name):
+        self.add_record(mailbox_sort_key(name))
+        self.refresh()
 
-    def _mailboxes_delete(self, mailbox):
-        self._widget.del_entry(mailbox.name_decoded)
-        self._widget.refresh()
-        return False
+    def on_delete_mailbox(self, name):
+        self.delete_record(mailbox_sort_key(name))
+        self.refresh()
 
-    def _mailbox_update(self, mailbox, what):
-        if what == 'unseen':
-            self._widget.redraw_entry(mailbox.name_decoded)
-            self._widget.refresh()
-        return False
-
-
-class _IndexView:
-    def __init__(self, config, model, mailbox, window, color_scheme):
-        self._config = config
-        self._model = model
-        self._mailbox = mailbox
-
-        self._model.on_message_add.register(self._message_add)
-        self._model.on_message_delete.register(self._message_delete)
-        self._model.on_message_update.register(self._message_update)
-        self._model.on_mailbox_update.register(self._mailbox_update)
-
-        self._widget = MenuWidget(self._formatter, window,
-                                  color_scheme, self._message_sort_key)
-        self._widget.add_entry(None, self._mailbox)
-        self._incomplete_messages = {}
-        for uid, message in self._mailbox.messages():
-            self._message_add(self._mailbox, uid, message, False)
-        self._widget.refresh()
-
-    @staticmethod
-    def _message_sort_key(key):
-        if key is None:
-            return -math.inf, None
-        id, envelope = key
-        if envelope.date is None:
-            return math.inf, id
-        else:
-            return -envelope.date.timestamp(), id
-
-    def hide(self):
-        return self._widget.setwin(None)
-
-    def show(self, window):
-        self._widget.setwin(window)
-        self._widget.refresh()
-
-    def close(self):
-        self._model.on_message_add.unregister(self._message_add)
-        self._model.on_message_delete.unregister(self._message_delete)
-        self._model.on_message_update.unregister(self._message_update)
-
-    def resize(self, nlines, ncols):
-        self._widget.resize(nlines, ncols)
-        self._widget.refresh()
+    def on_update_mailbox(self, name):
+        self.update_record(mailbox_sort_key(name))
+        self.refresh()
 
     def handle_input(self, view, c):
-        if c == ord('j'):
-            self._widget.move_indicator(1)
-            self._widget.refresh()
-        elif c == ord('k'):
-            self._widget.move_indicator(-1)
-            self._widget.refresh()
-        elif c == ord('\n'):
-            key, value = self._widget.get_indicator()
-            if key is not None:
-                message, uid = value
-                view.open_message_view(self._mailbox, uid, message)
+        if c == 0x0e:  # Ctrl-N
+            self.move_indicator(1)
+            self.refresh()
+            return True
+        elif c == 0x0f:  # Ctrl-O
+            view.open_index_view(self._indicator[2])
+            return True
+        elif c == 0x10:  # Ctrl-P
+            self.move_indicator(-1)
+            self.refresh()
+            return True
+        else:
+            return False
 
-    @staticmethod
-    def _formatter(window, color_scheme, key, value, is_indicator):
-        if key is None:
-            entry = value.name_decoded
-            exists = value.exists
-            unseen = value.num_unseen()
-            if exists is not None and unseen is not None:
-                entry += ' (%d unread / %d messages)' % (unseen, exists)
-            entry += ' ' * max(0, window.getmaxyx()[1] - len(entry))
-            color = 'index-indicator' if is_indicator else 'index'
-            window.insstr(entry, color_scheme[color])
+
+class IndexView(DBViewWidget):
+    def __init__(self, cache, mailbox, window, color_scheme):
+        self._cache = cache
+        self._mailbox = mailbox
+
+        # SQLite doesn't allow parameters in triggers, so we have to do this
+        # manually.
+        escaped = self._mailbox.replace("'", "''")
+
+        self._cache.db.create_function('index_view_add_mailbox_uid', 2, self.on_add_mailbox_uid)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER index_view_add_mailbox_uid
+        AFTER INSERT ON gmail_mailbox_uids WHEN NEW.mailbox='%s'
+        BEGIN
+            SELECT index_view_add_mailbox_uid(NEW.gm_msgid, NEW.date);
+        END''' % escaped)
+
+        self._cache.db.create_function('index_view_delete_mailbox_uid', 2, self.on_delete_mailbox_uid)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER index_view_delete_mailbox_uid
+        AFTER DELETE ON gmail_mailbox_uids WHEN OLD.mailbox='%s'
+        BEGIN
+            SELECT index_view_delete_mailbox_uid(OLD.gm_msgid, OLD.date);
+        END''' % escaped)
+
+        self._cache.db.create_function('index_view_update_message', 2, self.on_update_message)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER index_view_update_message
+        AFTER UPDATE OF date, timezone, "from", subject, flags
+        ON gmail_messages
+        WHEN EXISTS (SELECT gm_msgid FROM gmail_mailbox_uids WHERE mailbox='%s' AND date=NEW.date AND gm_msgid=NEW.gm_msgid)
+        BEGIN
+            SELECT index_view_update_message(NEW.gm_msgid, NEW.date);
+        END''' % escaped)
+
+        super().__init__(window, color_scheme)
+        self._stay_top = True
+
+    def close(self):
+        self._cache.db.execute('DROP TRIGGER index_view_add_mailbox_uid')
+        self._cache.db.execute('DROP TRIGGER index_view_delete_mailbox_uid')
+        self._cache.db.execute('DROP TRIGGER index_view_update_message')
+        self._cache.db.create_function('index_view_add_mailbox_uid', 0, None)
+        self._cache.db.create_function('index_view_delete_mailbox_uid', 0, None)
+        self._cache.db.create_function('index_view_update_message', 0, None)
+
+    def row_to_key(self, row):
+        return (-row['date'], -row['gm_msgid'])
+
+    def max_key(self):
+        row = self._cache.db.execute('''
+        SELECT date, gm_msgid FROM gmail_mailbox_uids
+        WHERE mailbox=?
+        ORDER by date ASC, gm_msgid ASC
+        LIMIT 1
+        ''', (self._mailbox,)).fetchone()
+        if row is None:
+            return None
+        else:
+            return self.row_to_key(row)
+
+    def prev_key(self, key):
+        date, gm_msgid = -key[0], -key[1]
+        row = self._cache.db.execute('''
+        SELECT date, gm_msgid FROM gmail_mailbox_uids
+        WHERE mailbox=? AND date=? AND gm_msgid>?
+        UNION
+        SELECT date, gm_msgid FROM gmail_mailbox_uids
+        WHERE mailbox=?1 AND date>?2
+        ORDER by date ASC, gm_msgid ASC
+        LIMIT 1''', (self._mailbox, date, gm_msgid)).fetchone()
+        if row is None:
+            return None
+        else:
+            return self.row_to_key(row)
+
+    def next_key(self, key):
+        date, gm_msgid = -key[0], -key[1]
+        row = self._cache.db.execute('''
+        SELECT date, gm_msgid FROM gmail_mailbox_uids
+        WHERE mailbox=? AND date=? AND gm_msgid<?
+        UNION
+        SELECT date, gm_msgid FROM gmail_mailbox_uids
+        WHERE mailbox=?1 AND date<?2
+        ORDER by date DESC, gm_msgid DESC
+        LIMIT 1''', (self._mailbox, date, gm_msgid)).fetchone()
+        if row is None:
+            return None
+        else:
+            return self.row_to_key(row)
+
+    def skip_forward(self, key, n):
+        date, gm_msgid = -key[0], -key[1]
+        row = self._cache.db.execute('''
+        SELECT date, gm_msgid, COUNT(*) - 1 FROM (
+            SELECT date, gm_msgid FROM gmail_mailbox_uids
+            WHERE mailbox=? AND date=? AND gm_msgid<=?
+            UNION
+            SELECT date, gm_msgid FROM gmail_mailbox_uids
+            WHERE mailbox=?1 AND date<?2
+            ORDER by date DESC, gm_msgid DESC
+            LIMIT ?
+        ) ORDER BY date ASC, gm_msgid ASC
+        LIMIT 1''', (self._mailbox, date, gm_msgid, n + 1)).fetchone()
+        return self.row_to_key(row), row[2]
+
+    def skip_backward(self, key, n):
+        date, gm_msgid = -key[0], -key[1]
+        row = self._cache.db.execute('''
+        SELECT date, gm_msgid, COUNT(*) - 1 FROM (
+            SELECT date, gm_msgid FROM gmail_mailbox_uids
+            WHERE mailbox=? AND date=? AND gm_msgid>=?
+            UNION
+            SELECT date, gm_msgid FROM gmail_mailbox_uids
+            WHERE mailbox=?1 AND date>?2
+            ORDER by date ASC, gm_msgid ASC
+            LIMIT ?
+        ) ORDER BY date DESC, gm_msgid DESC
+        LIMIT 1''', (self._mailbox, date, gm_msgid, n + 1)).fetchone()
+        return self.row_to_key(row), row[2]
+
+    def first_n(self, n):
+        return self._cache.db.execute('''
+        SELECT messages.gm_msgid, messages.date, messages.timezone,
+        messages."from", messages.subject, messages.flags
+        FROM gmail_messages AS messages JOIN gmail_mailbox_uids AS uids
+        WHERE uids.mailbox=? AND messages.gm_msgid=uids.gm_msgid
+        ORDER BY uids.date DESC, uids.gm_msgid DESC
+        LIMIT ?
+        ''', (self._mailbox, n))
+
+    def prev_n(self, key, n):
+        date, gm_msgid = -key[0], -key[1]
+        return self._cache.db.execute('''
+        SELECT messages.gm_msgid, messages.date, messages.timezone,
+        messages."from", messages.subject, messages.flags
+        FROM gmail_messages AS messages JOIN gmail_mailbox_uids AS uids
+        WHERE uids.mailbox=?
+        AND ((uids.date=? AND uids.gm_msgid>=?) OR (uids.date>?))
+        AND messages.gm_msgid=uids.gm_msgid
+        ORDER BY uids.date ASC, uids.gm_msgid ASC
+        LIMIT ?
+        ''', (self._mailbox, date, gm_msgid, date, n))
+
+    def next_n(self, key, n):
+        date, gm_msgid = -key[0], -key[1]
+        return self._cache.db.execute('''
+        SELECT messages.gm_msgid, messages.date, messages.timezone,
+        messages."from", messages.subject, messages.flags
+        FROM gmail_messages AS messages JOIN gmail_mailbox_uids AS uids
+        WHERE uids.mailbox=?
+        AND ((uids.date=? AND uids.gm_msgid<=?) OR (uids.date<?))
+        AND messages.gm_msgid=uids.gm_msgid
+        ORDER BY uids.date DESC, uids.gm_msgid DESC
+        LIMIT ?
+        ''', (self._mailbox, date, gm_msgid, date, n))
+
+    def draw_key(self, line, key):
+        gm_msgid = -key[1]
+        row = self._cache.db.execute('''
+        SELECT date, timezone, "from", subject, flags FROM gmail_messages
+        WHERE gm_msgid=?
+        ''', (gm_msgid,)).fetchone()
+        date = convert_date(row['date'], row['timezone'])
+        self._draw_record(line, gm_msgid == -self._indicator[1], date,
+                          convert_addrs(row['from']), row['subject'],
+                          convert_flags(row['flags']))
+
+    def draw_record(self, line, row):
+        date = convert_date(row['date'], row['timezone'])
+        self._draw_record(line, row['gm_msgid'] == -self._indicator[1], date,
+                          convert_addrs(row['from']), row['subject'],
+                          convert_flags(row['flags']))
+
+    def _draw_record(self, line, is_indicator, date, from_, subject, flags):
+        if not self._window:
             return
+        self._window.move(line, 0)
+        self._window.clrtoeol()
 
-        message = value[0]
         entry = []
-        if message.envelope.date is None:
-            entry.append('      ')
+        entry.append(date.strftime('%b %d'))
+        if from_:
+            realname, email_address = email.utils.parseaddr(from_[0])
+            if realname:
+                from_str = realname
+            else:
+                from_str = email_address
         else:
-            entry.append(message.envelope.date.strftime('%b %d'))
-        addrs = message.from_(name_only=True)
-        if addrs:
-            from_ = addrs[0]
-        else:
-            from_ = ''
-        entry.append('%-*.*s' % (ADDR_WIDTH, ADDR_WIDTH, from_))
-        subject = message.subject()
+            from_str = ''
+        entry.append('%-*.*s' % (ADDR_WIDTH, ADDR_WIDTH, from_str))
         if subject:
             entry.append(subject)
-        else:
-            entry.append('')
-        if '\\Seen' in message.flags:
+        if '\\Seen' in flags:
             color = 'index'
         else:
             color = 'index-new'
         if is_indicator:
             color += '-indicator'
         entry = ' '.join(entry)
-        entry += ' ' * max(0, window.getmaxyx()[1] - len(entry))
-        window.insstr(entry, color_scheme[color])
+        entry += ' ' * max(0, self._ncols - len(entry))
+        self._window.insstr(entry, self._color_scheme[color])
 
-    def _message_add(self, mailbox, uid, message, render=True):
-        if mailbox != self._mailbox:
-            return False
-        if message.envelope is None or message.flags is None:
-            self._incomplete_messages[message] = uid
-        else:
-            key = (message.id, message.envelope)
-            self._widget.add_entry(key, (message, uid))
-            if render:
-                self._widget.refresh()
-        return False
+    def on_add_mailbox_uid(self, gm_msgid, date):
+        self.add_record((-date, -gm_msgid))
+        self.refresh()
 
-    def _message_delete(self, mailbox, uid, message):
-        if mailbox != self._mailbox:
-            return False
-        if message.envelope:
-            key = (message.id, message.envelope)
-            self._widget.del_entry(key)
-            self._widget.refresh()
-        return False
+    def on_delete_mailbox_uid(self, gm_msgid, date):
+        self.delete_record((-date, -gm_msgid))
+        self.refresh()
 
-    def _message_update(self, message, what):
-        key = (message.id, message.envelope)
-        try:
-            uid = self._incomplete_messages[message]
-            if message.envelope is not None and message.flags is not None:
-                del self._incomplete_messages[message]
-                self._widget.add_entry(key, (message, uid))
-                self._widget.refresh()
-        except KeyError:
-            if key in self._widget.dict:
-                if what == 'flags':
-                    self._widget.redraw_entry(key)
-                    self._widget.refresh()
-        return False
+    def on_update_message(self, gm_msgid, date):
+        self.update_record((-date, -gm_msgid))
+        self.refresh()
 
-    def _mailbox_update(self, mailbox, what):
-        if mailbox == self._mailbox and (what == 'exists' or what == 'unseen'):
-            self._widget.redraw_entry(None)
-            self._widget.refresh()
-        return False
+    def _indicator_uid(self):
+        date, gm_msgid = -self._indicator[0], -self._indicator[1]
+        row = self._cache.db.execute('''
+        SELECT uid FROM gmail_mailbox_uids
+        WHERE mailbox=? AND date=? AND gm_msgid=?
+        ''', (self._mailbox, date, gm_msgid)).fetchone()
+        return row['uid']
+
+    def handle_input(self, view, c):
+        if c == ord('j'):
+            self.move_indicator(1)
+            self.refresh()
+            return True
+        elif c == ord('k'):
+            self.move_indicator(-1)
+            self.refresh()
+            return True
+        elif c == ord('\n'):
+            if self._indicator is not None:
+                uid = self._indicator_uid()
+                gm_msgid = -self._indicator[1]
+                view.open_message_view(self._mailbox, uid, gm_msgid)
 
 
 def sizeof_fmt(num):
@@ -461,79 +608,120 @@ def sizeof_fmt(num):
 
 
 class _MessageView:
-    def __init__(self, root_view, mailbox, uid, message, window, color_scheme):
+    def __init__(self, root_view, mailbox, uid, gm_msgid, window,
+                 color_scheme):
         self._root_view = root_view
-        self._model = root_view._model
+        self._cache = root_view._cache
         self._mailbox = mailbox
         self._uid = uid
-        self._message = message
-        self._model.on_message_update.register(self._message_update)
+        self._gm_msgid = gm_msgid
+
+        self._cache.db.create_function('message_view_update_bodystructure', 1,
+                                       self.on_update_bodystructure)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER message_view_update_bodystructure
+        AFTER UPDATE OF bodystructure ON gmail_messages
+        WHEN NEW.gm_msgid=%d
+        BEGIN
+            SELECT message_view_update_bodystructure(NEW.bodystructure);
+        END''' % self._gm_msgid)
+
+        self._cache.db.create_function('message_view_add_body_section', 2,
+                                       self.on_add_body_section)
+        self._cache.db.execute('''
+        CREATE TEMP TRIGGER message_view_add_body_section
+        AFTER INSERT ON gmail_message_bodies
+        WHEN NEW.gm_msgid=%d
+        BEGIN
+            SELECT message_view_add_body_section(NEW.section, NEW.body);
+        END''' % self._gm_msgid)
+
         self._widget = ScrollWidget(window, color_scheme)
-        if self._message.bodystructure:
+
+        row = self._cache.db.execute('''
+        SELECT date, timezone, subject, "from", "to", cc, bcc, bodystructure
+        FROM gmail_messages
+        WHERE gm_msgid=?
+        ''', (self._gm_msgid,)).fetchone()
+        self._date = convert_date(row['date'], row['timezone'])
+        self._from = convert_addrs(row['from'])
+        self._to = convert_addrs(row['to'])
+        self._cc = convert_addrs(row['cc'])
+        self._bcc = convert_addrs(row['bcc'])
+        self._subject = row['subject']
+        self._bodystructure = convert_bodystructure(row['bodystructure'])
+
+        cur = self._cache.db.execute('''
+        SELECT section, body FROM gmail_message_bodies
+        WHERE gm_msgid=?
+        ''', (self._gm_msgid,))
+        self._body_sections = {row['section']: row['body'] for row in cur}
+
+        self._root_view.on_open_message(self._mailbox, self._uid,
+                                        self._bodystructure is None)
+        if self._bodystructure:
             self._open_body_sections()
         self._redraw()
 
-    def hide(self):
-        return self._widget.setwin(None)
-
-    def show(self, window):
-        self._widget.setwin(window)
-        self._redraw()
-
     def close(self):
-        self._model.on_message_update.unregister(self._message_update)
+        self._cache.db.execute('DROP TRIGGER message_view_update_bodystructure')
+        self._cache.db.execute('DROP TRIGGER message_view_add_body_section')
+        self._cache.db.create_function('message_view_update_bodystructure', 0, None)
+        self._cache.db.create_function('message_view_add_body_section', 0, None)
 
-    def handle_input(self, view, c):
-        if c == ord('i'):
-            view.close_message_view()
-            return True
-        elif c == ord('j'):
-            self._widget.scroll(1)
-            self._widget.refresh()
-            return True
-        elif c == ord('k'):
-            self._widget.scroll(-1)
-            self._widget.refresh()
-            return True
-        else:
-            return False
-
-    def resize(self, nlines, ncols):
-        self._widget.resize(nlines, ncols)
+    def on_update_bodystructure(self, bodystructure):
+        self._bodystructure = convert_bodystructure(bodystructure)
+        self._open_body_sections()
         self._redraw()
 
-    def _message_update(self, message, what):
-        if message == self._message:
-            if what == 'bodystructure':
-                self._open_body_sections()
-                self._redraw()
-            elif what == 'body':
-                self._redraw()
-        return False
+    def on_add_body_section(self, section, body):
+        self._body_sections[section] = body
+        self._redraw()
+
+    def _walk_body(self):
+        def _walk_body_helper(body, section):
+            if body.type == 'multipart':
+                if body.subtype == 'mixed':
+                    for i, part in enumerate(body.parts, 1):
+                        section.append(str(i))
+                        yield from _walk_body_helper(part, section)
+                        section.pop()
+                elif body.subtype == 'alternative':
+                    # TODO: handle this properly
+                    yield body, '.'.join(section)
+                    section.append('1')
+                    yield from _walk_body_helper(body.parts[0], section)
+                    section.pop()
+                else:
+                    yield body, '.'.join(section)
+            else:
+                yield body, '.'.join(section)
+        section = []
+        if self._bodystructure.type != 'multipart':
+            section.append('1')
+        yield from _walk_body_helper(self._bodystructure, section)
 
     def _open_body_sections(self):
         sections = []
         for body, section in self._walk_body():
-            if body.type == 'text' or body.type == 'message':
+            if ((body.type == 'text' or body.type == 'message') and
+                section not in self._body_sections):
                 sections.append(section)
         self._root_view.on_read_body_sections(self._mailbox, self._uid,
                                               sections)
 
     def _redraw(self):
         self._widget.reset()
-        if self._message.envelope:
-            self._add_addrs('From', self._message.from_())
-            self._add_addrs('To', self._message.to())
-            self._add_addrs('Cc', self._message.cc())
-            self._add_addrs('Bcc', self._message.bcc())
-            if self._message.envelope.date:
-                date = self._message.envelope.date.strftime('%a, %b, %Y at %I:%M %p')
-                self._widget.add('Date: %s\n' % date, 'header')
-        subject = self._message.subject()
-        if subject:
-            self._widget.add('Subject: %s\n' % subject, 'header')
+        self._add_addrs('From', self._from)
+        self._add_addrs('To', self._to)
+        self._add_addrs('Cc', self._cc)
+        self._add_addrs('Bcc', self._bcc)
+        date = self._date.strftime('%a, %b, %Y at %I:%M %p')
+        self._widget.add('Date: %s\n' % date, 'header')
+        if self._subject:
+            self._widget.add('Subject: %s\n' % self._subject, 'header')
         self._widget.add('\n', 'body')
-        if self._message.bodystructure:
+        if self._bodystructure:
             for body, section in self._walk_body():
                 if body.type == 'multipart':
                     if body.subtype == 'alternative':
@@ -550,7 +738,7 @@ class _MessageView:
                 self._widget.add(body_div, 'header')
                 if body.type == 'text' or body.type == 'message':
                     try:
-                        content = self._message.get_body_section(section)
+                        content = self._body_sections[section]
                     except KeyError:
                         continue
                     decoded = self._decode_text_body(body, content)
@@ -574,25 +762,28 @@ class _MessageView:
         charset = body.params.get('charset', 'us-ascii')
         return content.decode(charset)
 
-    def _walk_body(self):
-        def _walk_body_helper(body, section):
-            if body.type == 'multipart':
-                if body.subtype == 'mixed':
-                    for i, part in enumerate(body.parts, 1):
-                        section.append(str(i))
-                        yield from _walk_body_helper(part, section)
-                        section.pop()
-                elif body.subtype == 'alternative':
-                    # TODO: handle this properly
-                    yield body, '.'.join(section)
-                    section.append('1')
-                    yield from _walk_body_helper(body.parts[0], section)
-                    section.pop()
-                else:
-                    yield body, '.'.join(section)
-            else:
-                yield body, '.'.join(section)
-        section = []
-        if self._message.bodystructure.type != 'multipart':
-            section.append('1')
-        yield from _walk_body_helper(self._message.bodystructure, section)
+    def handle_input(self, view, c):
+        if c == ord('i'):
+            view.close_message_view()
+            return True
+        elif c == ord('j'):
+            self._widget.scroll(1)
+            self._widget.refresh()
+            return True
+        elif c == ord('k'):
+            self._widget.scroll(-1)
+            self._widget.refresh()
+            return True
+        else:
+            return False
+
+    def resize(self, nlines, ncols):
+        self._widget.resize(nlines, ncols)
+        self._redraw()
+
+    def hide(self):
+        return self._widget.setwin(None)
+
+    def show(self, window):
+        self._widget.setwin(window)
+        self._redraw()
