@@ -191,8 +191,16 @@ class Cache:
         def decode_header(b):
             if b is None:
                 return None
-            # TODO: be robust to errors
-            return str(email.header.make_header(email.header.decode_header(b.decode('ascii'))))
+            try:
+                s = b.decode('ascii')
+            except UnicodeDecodeError:
+                # If it wasn't ASCII, try UTF-8, replacing any errors.
+                return b.decode('utf-8', errors='replace')
+            try:
+                return str(email.header.make_header(email.header.decode_header(s)))
+            except UnicodeDecodeError:
+                # If the header is malformed, just return the raw ASCII.
+                return s
         def envelope_addrs(addrs):
             if not addrs:
                 return None
