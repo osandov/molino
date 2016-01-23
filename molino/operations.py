@@ -1060,6 +1060,8 @@ class _IMAPSelectedState(_IMAPStateOperation):
         self._uids = [None] * (exists + 1)
         if exists:
             self._seque.put(1, exists)
+        # The last (i.e., smallest) UID we fetched.
+        self._last_uid = None
         unseen_op = IMAPPopulateUnseenOperation(self)
         unseen_op.callback = self._unseen_done
         unseen_op.start()
@@ -1176,15 +1178,7 @@ class _IMAPSelectedState(_IMAPStateOperation):
                            StatusLevel.info)
 
         seq_set = self._seque.get(150)
-        if isinstance(seq_set[-1], int):
-            last_seq = seq_set[-1]
-        else:
-            last_seq = seq_set[-1][1]
-        if last_seq == len(self._uids) - 1:
-            last_uid = -1
-        else:
-            last_uid = self._uids[last_seq + 1]
-        fetch_op = GmailFetchMessagesOperation(self, seq_set, last_uid)
+        fetch_op = GmailFetchMessagesOperation(self, seq_set, self._last_uid)
         fetch_op.callback = self._fetch_new_done
         fetch_op.start()
 
@@ -1194,6 +1188,13 @@ class _IMAPSelectedState(_IMAPStateOperation):
             self.update_status('Could not fetch messages', StatusLevel.error)
             self._gmail_hack(op.bad)
         else:
+            if isinstance(op._seq_set[0], int):
+                last_seq = op._seq_set[0]
+            else:
+                last_seq = op._seq_set[0][0]
+            last_uid = self._uids[last_seq]
+            if self._last_uid is None or last_uid < self._last_uid:
+                self._last_uid = last_uid
             # Do a NOOP after each FETCH to make sure we get new messages that
             # just arrived before old ones.
             self._enqueue_cmd(self._handle_tagged_noop, 'NOOP')

@@ -319,7 +319,7 @@ class Cache:
         ''', (gm_msgid, seq))
 
     def delete_fetching_missing(self, last_uid):
-        if last_uid == -1:
+        if last_uid is None:
             self.db.execute('''
             DELETE FROM gmail_mailbox_uids
             WHERE mailbox=?
