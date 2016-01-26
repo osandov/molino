@@ -231,6 +231,9 @@ class Work:
         self.type = type_
         self.args = args
 
+    def __eq__(self, other):
+        return self.type == other.type and self.args == other.args
+
     def is_selected_state(self):
         return self.type >= Work.Type.close
 
@@ -283,6 +286,11 @@ class IMAPWorkqueueOperation(MainSubOperation):
         assert self._callback == callback
         self._callback = None
 
+    def _add_work(self, work, combine_duplicates=True):
+        if combine_duplicates and self._queue and self._queue[-1] == work:
+            return
+        self._queue.append(work)
+
     def _work_added(self):
         if self._callback:
             callback = self._callback
@@ -292,30 +300,29 @@ class IMAPWorkqueueOperation(MainSubOperation):
     def quit(self):
         self._quit = True
         if self.selected:
-            self._queue.append(Work(Work.Type.close))
+            self._add_work(Work(Work.Type.close), False)
             self.selected = None
-        self._queue.append(Work(Work.Type.logout))
+        self._add_work(Work(Work.Type.logout), False)
         self._work_added()
 
     def refresh_mailbox_list(self):
-        self._queue.append(Work(Work.Type.refresh_list))
+        self._add_work(Work(Work.Type.refresh_list))
         self._work_added()
 
     def select_mailbox(self, mailbox):
-        if mailbox == self.selected:
-            return
-        if self.selected:
-            self._queue.append(Work(Work.Type.close))
-        self._queue.append(Work(Work.Type.select, mailbox))
-        self.selected = mailbox
-        self._work_added()
+        if mailbox != self.selected:
+            if self.selected:
+                self._add_work(Work(Work.Type.close), False)
+            self.selected = mailbox
+            self._add_work(Work(Work.Type.select, mailbox), False)
+            self._work_added()
 
     def fetch_bodystructure(self, uid):
-        self._queue.append(Work(Work.Type.fetch_bodystructure, uid))
+        self._add_work(Work(Work.Type.fetch_bodystructure, uid))
         self._work_added()
 
     def fetch_body_sections(self, uid, sections):
-        self._queue.append(Work(Work.Type.fetch_body_sections, uid, sections))
+        self._add_work(Work(Work.Type.fetch_body_sections, uid, sections))
         self._work_added()
 
 
