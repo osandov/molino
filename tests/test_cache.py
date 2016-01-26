@@ -42,16 +42,17 @@ class TestMailboxes(unittest.TestCase):
         db.close()
 
     def test_init(self):
-        self.check_db_full([('INBOX', b'INBOX', ord('/'), '', None, None, None)])
+        self.check_db_full([('INBOX', b'INBOX', ord('/'), '', None, None, None, None, None)])
 
     def test_add(self):
         self.cache.add_mailbox('[Gmail]', b'[Gmail]', delimiter=ord('/'),
                                attributes={'\\NonExistent', '\\HasChildren'},
-                               exists=0, unseen=0, recent=0)
+                               exists=0, unseen=0, recent=0, uidvalidity=0,
+                               highestmodseq=0)
         self.cache.commit()
         self.check_db_full([
-            ('INBOX', b'INBOX', ord('/'), '', None, None, None),
-            ('[Gmail]', b'[Gmail]', ord('/'), '\\HasChildren,\\NonExistent', 0, 0, 0),
+            ('INBOX', b'INBOX', ord('/'), '', None, None, None, None, None),
+            ('[Gmail]', b'[Gmail]', ord('/'), '\\HasChildren,\\NonExistent', 0, 0, 0, 0, 0),
         ])
 
     def test_delete(self):
@@ -64,12 +65,13 @@ class TestMailboxes(unittest.TestCase):
     def test_update(self):
         self.cache.update_mailbox('INBOX', exists=1, unseen=0)
         self.cache.commit()
-        self.check_db_full([('INBOX', b'INBOX', ord('/'), '', 1, 0, None)])
+        self.check_db_full([('INBOX', b'INBOX', ord('/'), '', 1, 0, None, None, None)])
 
         self.cache.update_mailbox('INBOX', delimiter=ord('/'),
-                                  attributes={'\\HasNoChildren'}, recent=1)
+                                  attributes={'\\HasNoChildren'}, recent=1,
+                                  uidvalidity=2, highestmodseq=3)
         self.cache.commit()
-        self.check_db_full([('INBOX', b'INBOX', ord('/'), '\\HasNoChildren', 1, 0, 1)])
+        self.check_db_full([('INBOX', b'INBOX', ord('/'), '\\HasNoChildren', 1, 0, 1, 2, 3)])
 
     def test_collate(self):
         # INBOX comes first

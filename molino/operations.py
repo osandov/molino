@@ -1009,7 +1009,13 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
 
     @_untagged_handler('OK')
     def _handle_ok(self, resp):
-        # TODO
+        if resp.data.code == 'HIGHESTMODSEQ':
+            self._cache.update_mailbox(self._mailbox, highestmodseq=resp.data.code_data)
+        elif resp.data.code == 'UIDVALIDITY':
+            old_uidvalidity = self._cache.get_mailbox_uidvalidity(self._mailbox)
+            if old_uidvalidity is not None:
+                assert resp.data.code_data == old_uidvalidity, "UIDVALIDITY has changed"
+            self._cache.update_mailbox(self._mailbox, uidvalidity=resp.data.code_data)
         return True
 
 

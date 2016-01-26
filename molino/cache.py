@@ -32,11 +32,13 @@ class Cache:
             attributes TEXT NOT NULL,
             "exists" INTEGER,
             unseen INTEGER,
-            recent INTEGER
+            recent INTEGER,
+            uidvalidity INTEGER,
+            highestmodseq INTEGER
         )''')
-        self.db.execute('INSERT OR IGNORE INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?)',
+        self.db.execute('INSERT OR IGNORE INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                         ('INBOX', b'INBOX', ord('/'), adapt_flags(set()), None,
-                         None, None))
+                         None, None, None, None))
 
         # Messages
 
@@ -108,16 +110,18 @@ class Cache:
     # Mailboxes
 
     def add_mailbox(self, name, raw_name, *, delimiter, attributes,
-                    exists=None, unseen=None, recent=None):
-        self.db.execute('INSERT INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    exists=None, unseen=None, recent=None, uidvalidity=None,
+                    highestmodseq=None):
+        self.db.execute('INSERT INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                         (name, raw_name, delimiter, adapt_flags(attributes),
-                         exists, unseen, recent))
+                         exists, unseen, recent, uidvalidity, highestmodseq))
 
     def delete_mailbox(self, name):
         self.db.execute('DELETE FROM mailboxes WHERE name=?', (name,))
 
     def update_mailbox(self, name, *, delimiter=None, attributes=None,
-                       exists=None, unseen=None, recent=None):
+                       exists=None, unseen=None, recent=None, uidvalidity=None,
+                       highestmodseq=None):
         cols = []
         params = []
         if delimiter is not None:
@@ -135,6 +139,12 @@ class Cache:
         if recent is not None:
             cols.append('recent=?')
             params.append(recent)
+        if uidvalidity is not None:
+            cols.append('uidvalidity=?')
+            params.append(uidvalidity)
+        if highestmodseq is not None:
+            cols.append('highestmodseq=?')
+            params.append(highestmodseq)
         assert len(params) > 0
         params.append(name)
         self.db.execute('UPDATE mailboxes SET ' + ', '.join(cols) + ' WHERE name=?',
@@ -152,6 +162,11 @@ class Cache:
 
     def get_mailbox_exists(self, name):
         cur = self.db.execute('SELECT "exists" FROM mailboxes WHERE name=?',
+                              (name,))
+        return cur.fetchone()[0]
+
+    def get_mailbox_uidvalidity(self, name):
+        cur = self.db.execute('SELECT uidvalidity FROM mailboxes WHERE name=?',
                               (name,))
         return cur.fetchone()[0]
 

@@ -219,7 +219,7 @@ text - human-readable text as str or None
 code - bracket-enclosed code type as str or None
 code_data - type-specific code data
     'ALERT', 'PARSE', 'READ-ONLY', 'READ-WRITE', 'TRYCREATE': None
-    'UIDNEXT', "UIDVALIDITY', 'UNSEEN': int
+    'HIGHESTMODSEQ', 'UIDNEXT', 'UIDVALIDITY', 'UNSEEN': int
     Anything else: str or None
 """
 ResponseText = namedtuple('ResponseText', ['text', 'code', 'code_data'])
@@ -895,7 +895,7 @@ class IMAP4Parser:
         if code in ['ALERT', 'PARSE', 'READ-ONLY', 'READ-WRITE',
                     'TRYCREATE']:
             data = None
-        if code in ['UIDNEXT', 'UIDVALIDITY', 'UNSEEN']:
+        if code in ['HIGHESTMODSEQ', 'UIDNEXT', 'UIDVALIDITY', 'UNSEEN']:
             self.expectc(ord(b' '))
             data = self.parse_number()
         else:
