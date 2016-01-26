@@ -68,6 +68,7 @@ class Operation:
         the count reaches zero, call self.done() to cleanup.
         """
         #  logging.debug('%r -1 = %d' % (self, self._pending - 1))
+        assert self._pending > 0
         self._pending -= 1
         if self._pending == 0:
             self._pending = None
@@ -250,15 +251,7 @@ class IMAPWorkqueueOperation(MainSubOperation):
 
     def start(self):
         super().start()
-        imap_op = _IMAPConnectionOperation(self)
-        imap_op.callback = self._conn_closed
-        imap_op.start()
-
-    def _conn_closed(self, op):
-        if self._quit:
-            self.dec_pending()
-        else:
-            assert False, "TODO"
+        NotConnectedOperation(self).start()
 
     def have_work(self):
         return len(self._queue) > 0
@@ -270,14 +263,11 @@ class IMAPWorkqueueOperation(MainSubOperation):
         assert work == self._queue[0]
         self._queue.popleft()
 
-    def fail_work(self, work):
-        assert False
-
     def fail_selected_work(self, work):
         assert work == self._queue[0]
         self._queue.popleft()
         stack = []
-        while self._queue and self._queue[0].type != Work.Type.select:
+        while self._queue and self._queue[0].type not in [Work.Type.select, Work.Type.close]:
             work2 = self._queue.popleft()
             if not work2.is_selected_state():
                 stack.append(work2)
@@ -329,19 +319,84 @@ class IMAPWorkqueueOperation(MainSubOperation):
         self._work_added()
 
 
+class NotConnectedOperation(MainSubOperation):
+    """
+    Operation while there is no open connection to the IMAP server. When work
+    arrives, attempts to open a new connection.
+    """
+
+    def __init__(self, workqueue):
+        super().__init__(workqueue._main, workqueue)
+        self._workqueue = workqueue
+        self.socket = None
+
+    def start(self):
+        super().start()
+        self.inc_pending()
+        self._process_work()
+
+    def _process_work(self):
+        if self._workqueue._quit:
+            self.dec_pending()
+            return
+        if self._workqueue.have_work():
+            addr = (self._main._config.imap.host, self._main._config.imap.port)
+            tcp_connect_op = TCPConnectOperation(self, addr)
+            tcp_connect_op.callback = self._tcp_connect_done
+            tcp_connect_op.start()
+        else:
+            self._workqueue.wait_for_work(self._process_work)
+
+    def _tcp_connect_done(self, op):
+        if op.socket:
+            if self._main._config.imap.ssl:
+                handshake_op = SSLHandshakeOperation(self, op.socket,
+                                                     self._main._config.imap.host)
+                handshake_op.callback = self._ssl_done
+                handshake_op.start()
+            else:
+                self._success(op.socket)
+        else:
+            self._failure()
+        self.dec_pending()
+
+    def _ssl_done(self, op):
+        if op.socket:
+            self._success(op.socket)
+        else:
+            self._failure()
+        self.dec_pending()
+
+    def _success(self, sock):
+        _IMAPConnectionOperation(self._workqueue, sock).start()
+        self.dec_pending()
+
+    def _failure(self):
+        while self._workqueue.have_work():
+            work = self._workqueue.get_work()
+            if work.type == Work.Type.logout:
+                self.dec_pending()
+                return
+            elif work.type == Work.Type.select or work.is_selected_state():
+                self._workqueue.fail_selected_work(work)
+            else:
+                self._workqueue.finish_work(work)
+        self._workqueue.wait_for_work(self._process_work)
+
+
 class _IMAPConnectionOperation(MainSubOperation):
     """
     Operation for the entire lifetime of a IMAP connection, responsible for:
 
-    1. Opening the TCP socket, wrapping it in SSL if necessary
-    2. Handling receiving and parsing from the server and dispatching events
-    3. Sending requests to the server
-    4. Shutting down and closing the socket
+    1. Handling receiving and parsing from the server and dispatching events
+    2. Sending requests to the server
+    3. Shutting down and closing the socket
     """
 
-    def __init__(self, parent):
-        super().__init__(parent._main, parent)
-        self._sock = None
+    def __init__(self, workqueue, socket):
+        super().__init__(workqueue._main, workqueue)
+        self._workqueue = workqueue
+        self._sock = socket
         self._capabilities = None
 
         self._untagged_handlers = {}
@@ -362,10 +417,7 @@ class _IMAPConnectionOperation(MainSubOperation):
 
     def start(self):
         super().start()
-        addr = (self._main._config.imap.host, self._main._config.imap.port)
-        tcp_connect_op = TCPConnectOperation(self, addr)
-        tcp_connect_op.callback = self._tcp_connect_done
-        tcp_connect_op.start()
+        self._start_greeting()
 
     def done(self):
         if self._select_events != 0:
@@ -374,24 +426,6 @@ class _IMAPConnectionOperation(MainSubOperation):
             self._sock.shutdown(socket.SHUT_RDWR)
             self._sock.close()
         super().done()
-
-    def _tcp_connect_done(self, op):
-        if op.socket:
-            if self._main._config.imap.ssl:
-                handshake_op = SSLHandshakeOperation(self, op.socket,
-                                                     self._main._config.imap.host)
-                handshake_op.callback = self._ssl_done
-                handshake_op.start()
-            else:
-                self._sock = op.socket
-                self._start_greeting()
-        self.dec_pending()
-
-    def _ssl_done(self, op):
-        if op.socket:
-            self._sock = op.socket
-            self._start_greeting()
-        self.dec_pending()
 
     def _start_greeting(self):
         self.inc_pending()  # Until the socket disconnects
@@ -467,6 +501,8 @@ class _IMAPConnectionOperation(MainSubOperation):
                 # logging.debug('S: %s' % self._recv_buf[:n])
                 if n == 0:
                     self.update_status('Disconnected', StatusLevel.error)
+                    if not self._workqueue._quit:
+                        NotConnectedOperation(self._workqueue).start()
                     self.dec_pending()
                     return
                 self._try_parse(self._recv_buf[:n])
@@ -918,7 +954,7 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
             self.dec_pending()  # Change state
         else:
             self._bad_response(resp)
-            self._workqueue.fail_work(work)
+            assert False, "Logout failed"
         self.dec_pending()
 
     def _list_done(self, op, work):
@@ -940,7 +976,7 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
             self._process_work()
         else:
             self._bad_response(resp)
-            self._workqueue.fail_work(work)
+            self._workqueue.fail_selected_work(work)
             self._process_work()
         self.dec_pending()
 
@@ -1144,7 +1180,7 @@ class _IMAPSelectedState(_IMAPStateOperation):
             self._bad_response(orig_resp)
             if orig_work:
                 assert orig_work.type != Work.Type.close, "CLOSE failed"
-                self._workqueue.fail_work(orig_work)
+                self._workqueue.finish_work(orig_work)
             self._process_work()
         elif resp.type == 'BAD':
             # If CHECK also failed, this is probably because of the Gmail bug.
