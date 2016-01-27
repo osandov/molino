@@ -33,12 +33,11 @@ class Cache:
             "exists" INTEGER,
             unseen INTEGER,
             recent INTEGER,
-            uidvalidity INTEGER,
-            highestmodseq INTEGER
+            uidvalidity INTEGER
         )''')
-        self.db.execute('INSERT OR IGNORE INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        self.db.execute('INSERT OR IGNORE INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                         ('INBOX', b'INBOX', ord('/'), adapt_flags(set()), None,
-                         None, None, None, None))
+                         None, None, None))
 
         # Messages
 
@@ -110,18 +109,16 @@ class Cache:
     # Mailboxes
 
     def add_mailbox(self, name, raw_name, *, delimiter, attributes,
-                    exists=None, unseen=None, recent=None, uidvalidity=None,
-                    highestmodseq=None):
-        self.db.execute('INSERT INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    exists=None, unseen=None, recent=None, uidvalidity=None):
+        self.db.execute('INSERT INTO mailboxes VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                         (name, raw_name, delimiter, adapt_flags(attributes),
-                         exists, unseen, recent, uidvalidity, highestmodseq))
+                         exists, unseen, recent, uidvalidity))
 
     def delete_mailbox(self, name):
         self.db.execute('DELETE FROM mailboxes WHERE name=?', (name,))
 
     def update_mailbox(self, name, *, delimiter=None, attributes=None,
-                       exists=None, unseen=None, recent=None, uidvalidity=None,
-                       highestmodseq=None):
+                       exists=None, unseen=None, recent=None, uidvalidity=None):
         cols = []
         params = []
         if delimiter is not None:
@@ -142,9 +139,6 @@ class Cache:
         if uidvalidity is not None:
             cols.append('uidvalidity=?')
             params.append(uidvalidity)
-        if highestmodseq is not None:
-            cols.append('highestmodseq=?')
-            params.append(highestmodseq)
         assert len(params) > 0
         params.append(name)
         self.db.execute('UPDATE mailboxes SET ' + ', '.join(cols) + ' WHERE name=?',
