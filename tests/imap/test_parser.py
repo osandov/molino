@@ -320,6 +320,15 @@ Message-ID: <1234@local.machine.example>
         fetch = UntaggedResponse('FETCH', Fetch(1, {'BODY[]': body}))
         self._test(resp, fetch)
 
+    def test_esearch(self):
+        self._test(b'* ESEARCH\r\n', UntaggedResponse('ESEARCH', Esearch(None, False, {})))
+        self._test(b'* ESEARCH (TAG "A282") MIN 2 COUNT 3\r\n',
+                   UntaggedResponse('ESEARCH', Esearch('A282', False, {'MIN': 2, 'COUNT': 3})))
+        self._test(b'* ESEARCH (TAG "A283") ALL 2,10:11\r\n',
+                   UntaggedResponse('ESEARCH', Esearch('A283', False, {'ALL': [2, (10, 11)]})))
+        self._test(b'* ESEARCH (TAG "A285") UID MIN 7 MAX 3800\r\n',
+                   UntaggedResponse('ESEARCH', Esearch('A285', True, {'MIN': 7, 'MAX': 3800})))
+
     def test_list(self):
         self._test(b'* LIST (\\HasNoChildren) "/" INBOX\r\n',
                    UntaggedResponse('LIST', List({'\\HasNoChildren'}, ord('/'), b'INBOX')))

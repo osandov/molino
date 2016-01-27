@@ -193,7 +193,7 @@ def format_noop(buffer, tag):
     return conts
 
 
-def format_search(buffer, tag, *criteria, uid=False):
+def format_search(buffer, tag, *criteria, uid=False, esearch=None):
     """
     Format SEARCH command.
 
@@ -202,8 +202,19 @@ def format_search(buffer, tag, *criteria, uid=False):
 
     ALL: (no arguments) all messages in mailbox
     UNSEEN: (no arguments) messages that do not have the \\Seen flag set
+
+    esearch - iterable of strings controlling what is returned with the ESEARCH
+    capability; an empty iterable is equivalent to an iterable containing only
+    'ALL'
+
+    MIN: the lowest message number/UID satisfying the criteria
+    MAX: the highest message number/UID satisfying the criteria
+    ALL: all message numbers/UIDs satisfying the criteria
+    COUNT: the number of messages satisfying the criteria
     """
     conts = _format_common(buffer, tag, 'UID SEARCH' if uid else 'SEARCH')
+    if esearch is not None:
+        buffer.extend(b' RETURN (%b)' % b' '.join(s.encode('ascii') for s in esearch))
     for c in criteria:
         key, args = c[0], c[1:]
         if key == 'ALL':

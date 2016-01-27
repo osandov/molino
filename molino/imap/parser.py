@@ -154,6 +154,18 @@ Envelope = namedtuple('Envelope', ['date', 'subject', 'from_', 'sender',
                                    'reply_to', 'to', 'cc', 'bcc',
                                    'in_reply_to', 'message_id'])
 
+
+"""
+ESEARCH response.
+
+tag - string or None
+uid - bool
+returned - dict[str]->data type:
+    'MIN', 'MAX', 'COUNT': int
+    'ALL': sequence set
+"""
+Esearch = namedtuple('Esearch', ['tag', 'uid', 'returned'])
+
 """
 FETCH response.
 
@@ -204,6 +216,7 @@ type - response type as str
 data - type-specific response data
     'OK', 'NO', 'BAD', 'BYE', 'PREAUTH': ResponseText
     'CAPABILITY', 'FLAGS': set of strings
+    'ESEARCH': Esearch
     'EXISTS', 'EXPUNGE', 'RECENT': int
     'FETCH': Fetch
     'LIST', 'LSUB': List
@@ -644,7 +657,34 @@ class IMAP4Parser:
     def parse_mailbox_data(self):
         """Returns data as per UntaggedResponse.data"""
         type_ = self._parse_token()
-        if type_ == 'FLAGS':
+        if type_ == 'ESEARCH':
+            # esearch-response
+            if self.peekc() != ord(b' '):
+                return Esearch(None, False, {})
+            self.getc()
+            tag = None
+            if self.peekc() == ord(b'('):
+                # search-correlator
+                self.expects(b'(TAG ')
+                tag = self.parse_string().decode('ascii')
+                self.expectc(ord(b')'))
+            uid = False
+            returned = {}
+            while True:
+                c = self.peekc()
+                if c != ord(' '):
+                    return Esearch(tag, uid, returned)
+                self.getc()
+                modifier = self._parse_token()
+                if modifier == 'UID':
+                    uid = True
+                elif modifier in ['COUNT', 'MAX', 'MIN']:
+                    self.expectc(ord(' '))
+                    returned[modifier] = self.parse_number()
+                elif modifier == 'ALL':
+                    self.expectc(ord(' '))
+                    returned[modifier] = self.parse_sequence_set()
+        elif type_ == 'FLAGS':
             self.expectc(ord(b' '))
             return self.parse_flag_list()
         elif type_ == 'LIST' or type_ == 'LSUB':
@@ -906,6 +946,22 @@ class IMAP4Parser:
             else:
                 data = None
         return code, data
+
+    def parse_sequence_set(self):
+        """Returns list of ints and (int, int) tuples."""
+        seq_set = []
+        while True:
+            number1 = self.parse_number()
+            if self.peekc() == ord(':'):
+                self.getc()
+                number2 = self.parse_number()
+                seq_set.append((number1, number2))
+            else:
+                seq_set.append(number1)
+            if self.peekc() == ord(','):
+                self.getc()
+            else:
+                return seq_set
 
     def parse_status_att_list(self):
         """Returns list of (str, int)."""

@@ -146,6 +146,16 @@ class TestFormat(unittest.TestCase):
         with self.assertRaises(ValueError):
             conts = format_search(self.buffer, 'A001', ('FOO',), uid=True)
 
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('ALL',), esearch=())
+        self.assertEqual(self.buffer, b'A001 SEARCH RETURN () ALL\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNSEEN',), esearch=('MIN', 'COUNT'))
+        self.assertEqual(self.buffer, b'A001 SEARCH RETURN (MIN COUNT) UNSEEN\r\n')
+        self.assertEqual(conts, [])
+
     def test_select(self):
         conts = format_select(self.buffer, 'A001', b'INBOX')
         self.assertEqual(self.buffer, b'A001 SELECT INBOX\r\n')
