@@ -86,6 +86,7 @@ class TestSSLHandshakeOperation(unittest.TestCase):
 
         self.test_op = TestOperation()
         self.sock = None
+        self.test_op.start()
 
     def tearDown(self):
         if self.sock:

@@ -15,6 +15,7 @@ class TestTCPConnectOperation(unittest.TestCase):
         self.sock.bind(('localhost', 0))
         self.sock.listen(0)
         self.shutdown = True
+        self.test_op.start()
 
     def tearDown(self):
         if self.shutdown:

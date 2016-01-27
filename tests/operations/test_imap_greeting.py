@@ -11,6 +11,7 @@ class TestIMAPGreetingOperation(unittest.TestCase):
         self.test_op = TestIMAPOperation()
         self.op = IMAPGreetingOperation(self.test_op)
         self.op.callback = op_callback()
+        self.test_op.start()
 
     def test_ok(self):
         self.op.start()
