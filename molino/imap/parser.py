@@ -179,6 +179,7 @@ items - mapping from item to value as dict[str]->data type:
     'BODY[]': dict[str]->(bytes, int)
     and origin is an int or None
     'UID': int
+    'MODSEQ': unsigned 63-bit int ('CONDSTORE' capability)
     'X-GM-MSGID': unsigned 64-bit int ('X-GM-EXT1' capability)
 """
 Fetch = namedtuple('Fetch', ['msg', 'items'])
@@ -804,9 +805,13 @@ class IMAP4Parser:
         elif item in ['RFC822', 'RFC822.HEADER', 'RFC822.TEXT']:
             self.expectc(ord(b' '))
             data = self.parse_nstring()
-        elif item == 'RFC822.SIZE':
+        elif item in ['RFC822.SIZE', 'UID', 'X-GM-MSGID']:
             self.expectc(ord(b' '))
             data = self.parse_number()
+        elif item == 'MODSEQ':
+            self.expects(b' (')
+            data = self.parse_number()
+            self.expectc(ord(b')'))
         elif item == 'BODY':
             if self.peekc() == ord('['):
                 self.getc()
@@ -831,12 +836,6 @@ class IMAP4Parser:
         elif item == 'BODYSTRUCTURE':
             self.expectc(ord(b' '))
             data = self.parse_body()
-        elif item == 'UID':
-            self.expectc(ord(b' '))
-            data = self.parse_number()
-        elif item == 'X-GM-MSGID':
-            self.expectc(ord(b' '))
-            data = self.parse_number()
         else:
             self._error('Unknown FETCH item %s' % item)
         return item, data

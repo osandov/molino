@@ -102,6 +102,11 @@ class TestFormat(unittest.TestCase):
         self.assertEqual(self.buffer, b'A001 FETCH 1:49,51:100 (UID ENVELOPE)\r\n')
         self.assertEqual(conts, [])
 
+        self.buffer.clear()
+        conts = format_fetch(self.buffer, 's100', [(1, 10)], 'FLAGS', uid=True, changedsince=12345)
+        self.assertEqual(self.buffer, b's100 UID FETCH 1:10 FLAGS (CHANGEDSINCE 12345)\r\n')
+        self.assertEqual(conts, [])
+
     def test_idle(self):
         conts = format_idle(self.buffer, 'A001')
         self.assertEqual(self.buffer, b'A001 IDLE\r\nDONE\r\n')

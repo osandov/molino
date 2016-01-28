@@ -124,7 +124,7 @@ def format_examine(buffer, tag, mailbox):
     return conts
 
 
-def format_fetch(buffer, tag, seq_set, *items, uid=False):
+def format_fetch(buffer, tag, seq_set, *items, uid=False, changedsince=None):
     """
     Format FETCH command.
 
@@ -141,6 +141,8 @@ def format_fetch(buffer, tag, seq_set, *items, uid=False):
         buffer.extend(items[0].encode('ascii'))
     else:
         format_paren_list(buffer, conts, items, format_ascii_atom)
+    if changedsince is not None:
+        buffer.extend(b' (CHANGEDSINCE %d)' % changedsince)
     buffer.extend(b'\r\n')
     return conts
 

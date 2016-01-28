@@ -194,6 +194,9 @@ Message-ID: <1234@local.machine.example>
         self._test(b'* 16 FETCH (RFC822.HEADER {180}\r\n' + header + b')\r\n',
                    UntaggedResponse('FETCH', Fetch(16, {'RFC822.HEADER': header})))
 
+        self._test(b'* 1 FETCH (MODSEQ (624140003))\r\n',
+                   UntaggedResponse('FETCH', Fetch(1, {'MODSEQ': 624140003})))
+
     def test_envelope(self):
         env = Envelope(None, None, None, None, None, None, None, None, None, None)
         self._test(b'* 2 FETCH (ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL))\r\n',
