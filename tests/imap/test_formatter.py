@@ -77,6 +77,11 @@ class TestFormat(unittest.TestCase):
         self.assertEqual(self.buffer, b'A001 CLOSE\r\n')
         self.assertEqual(conts, [])
 
+    def test_enable(self):
+        conts = format_enable(self.buffer, 'A001', 'CONDSTORE', 'X-GOOD-IDEA')
+        self.assertEqual(self.buffer, b'A001 ENABLE CONDSTORE X-GOOD-IDEA\r\n')
+        self.assertEqual(conts, [])
+
     def test_examine(self):
         conts = format_examine(self.buffer, 'A001', b'Trash')
         self.assertEqual(self.buffer, b'A001 EXAMINE Trash\r\n')

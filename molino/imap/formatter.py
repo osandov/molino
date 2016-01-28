@@ -98,6 +98,19 @@ def format_close(buffer, tag):
     return conts
 
 
+def format_enable(buffer, tag, *capabilities):
+    """
+    Format ENABLE command (requires ENABLE capability).
+
+    capabilities - capabilities to enable
+    """
+    conts = _format_common(buffer, tag, 'ENABLE')
+    buffer.extend(b' ')
+    buffer.extend(b' '.join(cap.encode('ascii') for cap in capabilities))
+    buffer.extend(b'\r\n')
+    return conts
+
+
 def format_examine(buffer, tag, mailbox):
     """
     Format EXAMINE command.

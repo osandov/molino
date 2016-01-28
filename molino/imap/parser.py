@@ -215,7 +215,7 @@ Untagged response.
 type - response type as str
 data - type-specific response data
     'OK', 'NO', 'BAD', 'BYE', 'PREAUTH': ResponseText
-    'CAPABILITY', 'FLAGS': set of strings
+    'CAPABILITY', 'ENABLED', 'FLAGS': set of strings
     'ESEARCH': Esearch
     'EXISTS', 'EXPUNGE', 'RECENT': int
     'FETCH': Fetch
@@ -878,8 +878,8 @@ class IMAP4Parser:
                 # resp-cond-state, resp-cond-auth, and resp-cond-bye
                 self.expectc(ord(b' '))
                 data = self.parse_resp_text()
-            elif type_ == 'CAPABILITY':
-                # capability-data
+            elif type_ in ['CAPABILITY', 'ENABLED']:
+                # capability-data, enable-data
                 caps = set()
                 while True:
                     c = self.peekc()

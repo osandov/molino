@@ -320,6 +320,12 @@ Message-ID: <1234@local.machine.example>
         fetch = UntaggedResponse('FETCH', Fetch(1, {'BODY[]': body}))
         self._test(resp, fetch)
 
+    def test_enabled(self):
+        self._test(b'* ENABLED\r\n', UntaggedResponse('ENABLED', set()))
+        self._test(b'* ENABLED CONDSTORE\r\n', UntaggedResponse('ENABLED', {'CONDSTORE'}))
+        self._test(b'* ENABLED CONDSTORE X-GOOD-IDEA\r\n',
+                   UntaggedResponse('ENABLED', {'CONDSTORE', 'X-GOOD-IDEA'}))
+
     def test_esearch(self):
         self._test(b'* ESEARCH\r\n', UntaggedResponse('ESEARCH', Esearch(None, False, {})))
         self._test(b'* ESEARCH (TAG "A282") MIN 2 COUNT 3\r\n',
