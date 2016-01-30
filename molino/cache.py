@@ -309,51 +309,43 @@ class Cache:
         WHERE mailbox=? AND uid=?
         ''', (mailbox, uid))
 
-    def create_temp_fetching_table(self, mailbox):
+    # Fetching
+
+    def create_temp_fetching_table(self, mailbox, uids=None):
         self.db.execute('''
         CREATE TEMP TABLE temp.fetching (
-            seq INTEGER PRIMARY KEY,
-            uid INTEGER NOT NULL,
+            uid INTEGER PRIMARY KEY,
             gm_msgid INTEGER
         )''')
-        self.db.execute('''
-        CREATE UNIQUE INDEX temp.fetching_index_uid ON fetching (uid)
-        ''')
         self._fetching_mailbox = mailbox
+        if uids is not None:
+            self.db.executemany('''
+            INSERT INTO temp.fetching (uid) VALUES (?)
+            ''', ((uid,) for uid in uids))
 
     def drop_temp_fetching_table(self):
         self.db.execute('DROP TABLE temp.fetching')
         del self._fetching_mailbox
 
-    def add_fetching_uid(self, seq, uid):
+    def add_fetching_uid(self, uid, gm_msgid):
         self.db.execute('''
-        INSERT INTO temp.fetching (seq, uid) VALUES (?, ?)
-        ''', (seq, uid))
+        INSERT INTO temp.fetching VALUES (?, ?)
+        ''', (uid, gm_msgid))
 
-    def add_fetching_gm_msgid(self, seq, gm_msgid):
+    def delete_fetching_uid(self, uid):
         self.db.execute('''
-        UPDATE temp.fetching SET gm_msgid=? WHERE seq=?
-        ''', (gm_msgid, seq))
+        DELETE FROM temp.fetching
+        WHERE uid=?
+        ''', (uid,))
 
-    def delete_fetching_missing(self, last_uid):
-        if last_uid is None:
-            self.db.execute('''
-            DELETE FROM gmail_mailbox_uids
-            WHERE mailbox=?
-            AND uid>(SELECT MIN(uid) FROM temp.fetching)
-            AND uid NOT IN (SELECT uid FROM temp.fetching)
-            ''', (self._fetching_mailbox,))
-        else:
-            self.db.execute('''
-            DELETE FROM gmail_mailbox_uids
-            WHERE mailbox=?
-            AND uid>(SELECT MIN(uid) FROM temp.fetching) AND uid<?
-            AND uid NOT IN (SELECT uid FROM temp.fetching)
-            ''', (self._fetching_mailbox, last_uid))
+    def update_fetching_gm_msgid(self, uid, gm_msgid):
+        self.db.execute('''
+        UPDATE temp.fetching SET gm_msgid=? WHERE uid=?
+        ''', (gm_msgid, uid))
 
     def get_fetching_old_new_uids(self):
         cur = self.db.execute('''
-        SELECT seq, uid IN (SELECT uid FROM gmail_mailbox_uids WHERE mailbox=?)
+        SELECT uid, uid IN (SELECT uid FROM gmail_mailbox_uids WHERE mailbox=?)
         FROM temp.fetching
         ''', (self._fetching_mailbox,))
         old = set()
@@ -367,7 +359,7 @@ class Cache:
 
     def get_fetching_old_new_gm_msgids(self):
         cur = self.db.execute('''
-        SELECT seq, gm_msgid, gm_msgid IN (SELECT gm_msgid FROM gmail_messages)
+        SELECT uid, gm_msgid, gm_msgid IN (SELECT gm_msgid FROM gmail_messages)
         FROM temp.fetching
         ''')
         old = {}
@@ -380,14 +372,24 @@ class Cache:
         return old, new
 
     def add_fetching_uids(self):
-        self.db.execute('''
+        cur = self.db.execute('''
         INSERT INTO gmail_mailbox_uids
         SELECT ?, uid, gm_msgid, (
             SELECT date FROM gmail_messages WHERE gm_msgid=temp.fetching.gm_msgid
         )
         FROM temp.fetching
         WHERE gm_msgid NOT NULL
+        ORDER BY uid DESC
         ''', (self._fetching_mailbox,))
+        return cur.rowcount
+
+    def delete_fetching_missing(self, start_uid, end_uid):
+        self.db.execute('''
+        DELETE FROM gmail_mailbox_uids
+        WHERE mailbox=?
+        AND uid>=? AND uid<?
+        AND uid NOT IN (SELECT uid FROM temp.fetching)
+        ''', (self._fetching_mailbox, start_uid, end_uid))
 
 
 def mailbox_sort_key(mailbox):

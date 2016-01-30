@@ -134,8 +134,16 @@ def format_fetch(buffer, tag, seq_set, *items, uid=False, changedsince=None):
     """
     conts = _format_common(buffer, tag, 'UID FETCH' if uid else 'FETCH')
     buffer.extend(b' ')
-    buffer.extend(b','.join(b'%d' % seq if isinstance(seq, int) else b'%d:%d' % seq
-                            for seq in seq_set))
+    for i, seq in enumerate(seq_set):
+        if i != 0:
+            buffer.extend(b',')
+        if seq is None:
+            buffer.extend(b'*')
+        elif isinstance(seq, int):
+            buffer.extend(b'%d' % seq)
+        else:
+            buffer.extend(b'*' if seq[0] is None else b'%d' % seq[0])
+            buffer.extend(b':*' if seq[1] is None else b':%d' % seq[1])
     buffer.extend(b' ')
     if len(items) == 1:
         buffer.extend(items[0].encode('ascii'))

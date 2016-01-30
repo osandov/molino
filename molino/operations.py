@@ -14,7 +14,6 @@ import molino.imap.parser
 import molino.imap.formatter
 import molino.imap as imap
 from molino.view import StatusLevel
-from molino.seque import SequenceQueue
 import molino.signalfd as signalfd
 import molino.timerfd as timerfd
 
@@ -59,7 +58,7 @@ class Operation:
         Increment the count of pending actions this operation is waiting on.
         """
         assert self._pending is not None
-        #  logging.debug('%r +1 = %d' % (self, self._pending + 1))
+        # logging.debug('%r +1 = %d' % (self, self._pending + 1))
         self._pending += 1
 
     def dec_pending(self):
@@ -67,7 +66,7 @@ class Operation:
         Decrement the count pending actions this operation is waiting on. If
         the count reaches zero, call self.done() to cleanup.
         """
-        #  logging.debug('%r -1 = %d' % (self, self._pending - 1))
+        # logging.debug('%r -1 = %d' % (self, self._pending - 1))
         assert self._pending > 0
         self._pending -= 1
         if self._pending == 0:
@@ -493,6 +492,7 @@ class _IMAPConnectionOperation(MainSubOperation):
         self._send_queue.append((buf, conts))
         self._tagged_handlers[tag] = callback
         self._try_send()
+        return tag
 
     def _select_sock(self, mask):
         if mask & self._recv_want:
@@ -532,7 +532,7 @@ class _IMAPConnectionOperation(MainSubOperation):
                 self._parser.advance()
             except imap.parser.IMAPShortParse:
                 break
-            #  logging.debug('Parsed %s' % repr(resp))
+            # logging.debug('Parsed %s' % repr(resp))
             if isinstance(resp, imap.parser.UntaggedResponse):
                 self._untagged_handlers[resp.type](resp)
             elif isinstance(resp, imap.parser.TaggedResponse):
@@ -814,7 +814,7 @@ class _IMAPOperation(MainSubOperation):
 
     def _enqueue_cmd(self, callback, cmd, *args, **kwds):
         self.inc_pending()
-        self._imap._enqueue_cmd(callback, cmd, *args, **kwds)
+        return self._imap._enqueue_cmd(callback, cmd, *args, **kwds)
 
     def _bad_response(self, resp):
         # TODO
@@ -1093,35 +1093,38 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def __init__(self, imap, mailbox):
         super().__init__(imap)
         self._mailbox = mailbox
-        self._seque = SequenceQueue()
         self._gmail = self._imap.have_capability('X-GM-EXT-1')
         self._idle = self._imap.have_capability('IDLE')
+        self._esearch = self._imap.have_capability('ESEARCH')
+        self._uids = None
+        self._unseen = None
+        self._fetching_cursor = None
         self._fetching = False
+        self._new_messages = 0
         self._closed = False
 
     def start(self):
         super().start()
         self.inc_pending()  # Until we change state
         self.update_status('Selected %s' % self._mailbox, StatusLevel.info)
-        exists = self._cache.get_mailbox_exists(self._mailbox)
-        self._uids = [None] * (exists + 1)
-        if exists:
-            self._seque.put(1, exists)
-        # The last (i.e., smallest) UID we fetched.
-        self._last_uid = None
-        unseen_op = IMAPPopulateUnseenOperation(self)
-        unseen_op.callback = self._unseen_done
-        unseen_op.start()
+        assert self._esearch, "TODO"
+        search_op = IMAPPopulateEsearchOperation(self)
+        search_op.callback = self._search_done
+        search_op.start()
 
-    def _unseen_done(self, op):
+    def _search_done(self, op):
         if op.bad is not None:
-            self.update_status('Could not search unseen messages',
+            self.update_status('Could not populate message list',
                                StatusLevel.error)
             self._gmail_hack(op.bad)
         else:
+            self._uids = op.uids
             self._unseen = op.unseen
-            self._cache.update_mailbox(self._mailbox, unseen=len(self._unseen))
+            self._cache.update_mailbox(self._mailbox, exists=len(self._uids) - 1,
+                                       unseen=len(self._unseen))
             self._cache.commit()
+            # Fetching cursor is the lowest sequence number that we've fetched.
+            self._fetching_cursor = len(self._uids)
             self._process_work()
         self.dec_pending()
 
@@ -1147,8 +1150,10 @@ class _IMAPSelectedState(_IMAPStateOperation):
                                   'FETCH', [uid], *['BODY.PEEK[%s]' % section for section in sections], uid=True)
             else:
                 assert False
-        elif len(self._seque) > 0:
+        elif self._new_messages > 0:
             self._fetch_new_messages()
+        elif self._fetching_cursor > 1:
+            self._fetch_disconnected_messages()
         elif self._idle:
             idle_op = IMAPIdleOperation(self)
             idle_op.callback = self._idle_done
@@ -1221,37 +1226,48 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def _fetch_new_messages(self):
         assert not self._fetching
         self._fetching = True
-        self.update_status('Fetching %s (%d)' % (self._mailbox, len(self._seque)),
-                           StatusLevel.info)
-
-        seq_set = self._seque.get(150)
-        fetch_op = GmailFetchMessagesOperation(self, seq_set, self._last_uid)
-        fetch_op.callback = self._fetch_new_done
+        uidnext = self._uids[-self._new_messages - 1] + 1
+        fetch_op = GmailFetchNewMessagesOperation(self, uidnext)
+        fetch_op.callback = self._fetch_new_messages_done
         fetch_op.start()
 
-    def _fetch_new_done(self, op):
+    def _fetch_new_messages_done(self, op):
         self._fetching = False
         if op.bad is not None:
             self.update_status('Could not fetch messages', StatusLevel.error)
             self._gmail_hack(op.bad)
         else:
-            if isinstance(op._seq_set[0], int):
-                last_seq = op._seq_set[0]
-            else:
-                last_seq = op._seq_set[0][0]
-            last_uid = self._uids[last_seq]
-            if self._last_uid is None or last_uid < self._last_uid:
-                self._last_uid = last_uid
-            # Do a NOOP after each FETCH to make sure we get new messages that
-            # just arrived before old ones.
-            self._enqueue_cmd(self._handle_tagged_noop, 'NOOP')
+            fetched = self._uids[-self._new_messages - 1:-self._new_messages + op.new_fetched]
+            assert not any(uid == 0 for uid in fetched)
+            self._new_messages -= op.new_fetched
+            self._process_work()
         self.dec_pending()
 
-    def _handle_tagged_noop(self, resp):
-        if resp.type == 'OK':
-            self._process_work()
+    def _fetch_disconnected_messages(self):
+        assert not self._fetching
+        self._fetching = True
+        self.update_status('Fetching %s (%d)' % (self._mailbox, self._fetching_cursor - 1),
+                           StatusLevel.info)
+        i = max(1, self._fetching_cursor - 250)
+        j = self._fetching_cursor
+        start_uid = self._uids[i]
+        if j < len(self._uids):
+            end_uid = self._uids[j]
         else:
-            self._bad_response(resp)
+            end_uid = self._uids[-1] + 1
+        uids = self._uids[i:j]
+        self._fetching_cursor = i
+        fetch_op = GmailFetchDisconnectedMessagesOperation(self, uids,
+                                                           start_uid, end_uid)
+        fetch_op.callback = self._fetch_disconnected_messages_done
+        fetch_op.start()
+
+    def _fetch_disconnected_messages_done(self, op):
+        self._fetching = False
+        if op.bad is not None:
+            self.update_status('Could not fetch messages', StatusLevel.error)
+            self._gmail_hack(op.bad)
+        else:
             self._process_work()
         self.dec_pending()
 
@@ -1272,8 +1288,8 @@ class _IMAPSelectedState(_IMAPStateOperation):
         old_exists = len(self._uids) - 1
         assert exists >= old_exists
         if exists > old_exists:
-            self._seque.put(old_exists + 1, exists)
-            self._uids.extend([None] * (exists - old_exists))
+            self._new_messages += (exists - old_exists)
+            self._uids.extend([0] * (exists - old_exists))
             self._cache.update_mailbox(self._mailbox, exists=exists)
             if not self._fetching:
                 self._cache.commit()
@@ -1283,17 +1299,22 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def _handle_expunge(self, resp):
         old_exists = len(self._uids) - 1
         assert resp.data <= old_exists
+        update = {'exists': old_exists - 1}
+
+        if resp.data < self._fetching_cursor:
+            self._fetching_cursor -= 1
+
         uid = self._uids.pop(resp.data)
-        self._cache.update_mailbox(self._mailbox, exists=old_exists - 1)
-        if uid is None:
-            # TODO: garbage collection of UIDs that we don't fetch before they
-            # get expunged.
-            assert False
-        else:
-            self._cache.delete_mailbox_uid(self._mailbox, uid)
+        self._cache.delete_mailbox_uid(self._mailbox, uid)
+
+        old_unseen = len(self._unseen)
+        self._unseen.discard(uid)
+        if len(self._unseen) != old_unseen:
+            update['unseen'] = len(self._unseen)
+
+        self._cache.update_mailbox(self._mailbox, **update)
         if not self._fetching:
             self._cache.commit()
-        self._seque.delete(resp.data)
         return True
 
     @_untagged_handler('FETCH')
@@ -1301,12 +1322,9 @@ class _IMAPSelectedState(_IMAPStateOperation):
         fetch = resp.data
         want_commit = False
         if 'UID' in fetch.items:
-            self._uids[fetch.msg] = fetch.items['UID']
-        try:
+            uid = fetch.items['UID']
+        else:
             uid = self._uids[fetch.msg]
-        except KeyError:
-            # XXX
-            return True
         update = {}
         if 'BODYSTRUCTURE' in fetch.items:
             update['bodystructure'] = fetch.items['BODYSTRUCTURE']
@@ -1331,20 +1349,71 @@ class _IMAPSelectedState(_IMAPStateOperation):
         return True
 
 
-class IMAPPopulateUnseenOperation(_IMAPSubOperation):
+class IMAPPopulateEsearchOperation(_IMAPSubOperation):
     def __init__(self, state):
         super().__init__(state)
-        self.unseen = None
+        self._unseen = None
+        self.uids = None
         self.bad = None
 
     def start(self):
         super().start()
-        self._enqueue_cmd(self._handle_tagged_search, 'SEARCH', ('UNSEEN',), uid=True)
+        self._esearch_all()
+        self._esearch_unseen()
 
-    @_untagged_handler('SEARCH')
-    def _handle_search(self, resp):
-        self.unseen = resp.data
+    def _esearch_all(self):
+        self.uids = None
+        self._all_tag = self._enqueue_cmd(self._handle_tagged_search, 'SEARCH',
+                                          ('ALL',), uid=True, esearch=())
+
+    def _esearch_unseen(self):
+        self.unseen = None
+        self._unseen_tag = self._enqueue_cmd(self._handle_tagged_search, 'SEARCH',
+                                             ('UNSEEN',), uid=True, esearch=())
+
+    @_untagged_handler('EXISTS')
+    def _handle_exists(self, resp):
+        # If new messages have come in, our information is out of date. Since
+        # this probably won't happen very often, we can keep things simple and
+        # just redo the searches.
+        if self.uids is not None:
+            self._esearch_all()
+        if self.unseen is not None:
+            self._esearch_unseen()
         return True
+
+    @_untagged_handler('EXPUNGE')
+    def _handle_expunge(self, resp):
+        if self.uids is not None:
+            # If we've already gotten the ESEARCH ALL response, then we need to
+            # remove the message that was expunged.
+            uid = self.uids.pop(resp.data)
+            if self.unseen is not None:
+                self.unseen.discard(uid)
+        elif self.unseen:
+            # If we haven't gotten the ESEARCH ALL response yet, then the
+            # expunged message will not be in the response when we get it.
+            # However, if we already got the ESEARCH UNSEEN response, we might
+            # need to remove the expunged message from the set of of unseen
+            # messages, which we can't do without being able to map the
+            # sequence number to a UID. Since this is probably a rare case,
+            # just redo the search.
+            self._esearch_unseen()
+        return True
+
+    @_untagged_handler('ESEARCH')
+    def _handle_esearch(self, resp):
+        esearch = resp.data
+        if esearch.tag == self._all_tag:
+            seq_set = esearch.returned.get('ALL', [])
+            self.uids = imap.seq_set_to_array(seq_set, True)
+            return True
+        elif esearch.tag == self._unseen_tag:
+            seq_set = esearch.returned.get('ALL', [])
+            self.unseen = imap.seq_set_to_set(seq_set)
+            return True
+        else:
+            return False
 
     def _handle_tagged_search(self, resp):
         if resp.type == 'BAD':
@@ -1355,49 +1424,18 @@ class IMAPPopulateUnseenOperation(_IMAPSubOperation):
         return True
 
 
-class GmailFetchMessagesOperation(_IMAPSubOperation):
-    def __init__(self, state, seq_set, last_uid):
+class _GmailFetchMessagesOperation(_IMAPSubOperation):
+    def __init__(self, state):
         super().__init__(state)
-        self._mailbox = state._mailbox
-        self._fetching_uids = False
-        self._fetching_gm_msgids = False
-        self._fetching_envelopes = False
-        self._seq_set = seq_set
-        self._last_uid = last_uid
+        self._state = state
+        self._mailbox = self._state._mailbox
         self.bad = None
-
-    def start(self):
-        super().start()
-        self._fetching_uids = True
-        self._cache.create_temp_fetching_table(self._mailbox)
-        self._enqueue_cmd(self._handle_tagged_fetch_uids,
-                          'FETCH', self._seq_set, 'UID')
+        self.new_fetched = 0
 
     def done(self):
         self._cache.drop_temp_fetching_table()
         self._cache.commit()
         super().done()
-
-    def _handle_tagged_fetch_uids(self, resp):
-        if resp.type == 'BAD':
-            self.bad = resp
-            self.dec_pending()
-            return True
-        elif resp.type != 'OK':
-            assert False, "TODO"
-        self._cache.delete_fetching_missing(self._last_uid)
-        old, new = self._cache.get_fetching_old_new_uids()
-        self._fetching_uids = False
-        if new:
-            self._fetching_gm_msgids = True
-            seq_set = imap.sequence_set(new)
-            self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
-                              'FETCH', seq_set, 'X-GM-MSGID')
-        if old:
-            seq_set = imap.sequence_set(old)
-            self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS')
-        self.dec_pending()
-        return True
 
     def _handle_tagged_fetch_gm_msgids(self, resp):
         if resp.type == 'BAD':
@@ -1407,16 +1445,15 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
         elif resp.type != 'OK':
             assert False, "TODO"
         old, new = self._cache.get_fetching_old_new_gm_msgids()
-        self._fetching_gm_msgids = False
         if new:
-            self._fetching_envelopes = True
             self._new_gm_msgids = new
             seq_set = imap.sequence_set(new)
             self._enqueue_cmd(self._handle_tagged_fetch_envelopes,
-                              'FETCH', seq_set, 'ENVELOPE', 'FLAGS')
+                              'FETCH', seq_set, 'ENVELOPE', 'FLAGS', uid=True)
         if old:
             seq_set = imap.sequence_set(old)
-            self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS')
+            self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS',
+                              uid=True)
         self.dec_pending()
         return True
 
@@ -1427,32 +1464,80 @@ class GmailFetchMessagesOperation(_IMAPSubOperation):
             return True
         elif resp.type != 'OK':
             assert False, "TODO"
-        self._cache.add_fetching_uids()
+        self.new_fetched = self._cache.add_fetching_uids()
         self.dec_pending()
         return True
 
     @_untagged_handler('EXPUNGE')
     def _handle_expunge(self, resp):
-        # This MUST NOT happen while we're doing a FETCH. If it did, there's a
-        # bug in the server or the client, so fail hard before we do any
-        # permanent damage because our sequence numbers got out of sync.
-        assert False, "Got EXPUNGE during FETCH"
+        uid = self._state._uids[resp.data]
+        self._cache.db.delete_fetching_uid(uid)
+        return False
+
+    def _handle_fetch(self, resp):
+        fetch = resp.data
+        if 'X-GM-MSGID' in fetch.items:
+            uid = fetch.items.pop('UID')
+            gm_msgid = fetch.items.pop('X-GM-MSGID')
+            self._cache.update_fetching_gm_msgid(uid, gm_msgid)
+            return True
+        elif 'ENVELOPE' in fetch.items:
+            uid = fetch.items.pop('UID')
+            envelope = fetch.items.pop('ENVELOPE')
+            flags = fetch.items.pop('FLAGS')
+            gm_msgid = self._new_gm_msgids[uid]
+            self._cache.add_message_with_envelope(gm_msgid, envelope, flags=flags)
+            return True
+        else:
+            return False
+
+
+class GmailFetchNewMessagesOperation(_GmailFetchMessagesOperation):
+    def __init__(self, state, uidnext):
+        super().__init__(state)
+        self._uidnext = uidnext
+
+    def start(self):
+        super().start()
+        self._cache.create_temp_fetching_table(self._mailbox)
+        self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
+                          'FETCH', [(self._uidnext, None)], 'X-GM-MSGID', uid=True)
 
     @_untagged_handler('FETCH')
     def _handle_fetch(self, resp):
         fetch = resp.data
-        if self._fetching_uids:
-            self._cache.add_fetching_uid(fetch.msg, fetch.items['UID'])
-        elif self._fetching_gm_msgids:
-            gm_msgid = fetch.items.pop('X-GM-MSGID')
-            self._cache.add_fetching_gm_msgid(fetch.msg, gm_msgid)
-        elif self._fetching_envelopes and 'ENVELOPE' in fetch.items:
-            envelope = fetch.items.pop('ENVELOPE')
-            flags = fetch.items.pop('FLAGS')
-            gm_msgid = self._new_gm_msgids[fetch.msg]
-            self._cache.add_message_with_envelope(gm_msgid, envelope, flags=flags)
-        # _IMAPSelectedState handles other FETCH items
-        return len(fetch.items) == 0
+        if 'X-GM-MSGID' in fetch.items:
+            uid = fetch.items['UID']
+            gm_msgid = fetch.items['X-GM-MSGID']
+            self._state._uids[resp.data.msg] = uid
+            self._cache.add_fetching_uid(uid, gm_msgid)
+        super()._handle_fetch(resp)
+
+
+class GmailFetchDisconnectedMessagesOperation(_GmailFetchMessagesOperation):
+    def __init__(self, state, uids, start_uid, end_uid):
+        super().__init__(state)
+        self._uids = uids
+        self._start_uid = start_uid
+        self._end_uid = end_uid
+
+    def start(self):
+        super().start()
+        self._cache.create_temp_fetching_table(self._mailbox, self._uids)
+        self._cache.delete_fetching_missing(self._start_uid, self._end_uid)
+        old, new = self._cache.get_fetching_old_new_uids()
+        if new:
+            seq_set = imap.sequence_set(new)
+            self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
+                              'FETCH', seq_set, 'X-GM-MSGID', uid=True)
+        if old:
+            seq_set = imap.sequence_set(old)
+            self._enqueue_cmd(self._handle_tagged,
+                              'FETCH', seq_set, 'FLAGS', uid=True)
+
+    @_untagged_handler('FETCH')
+    def _handle_fetch(self, resp):
+        super()._handle_fetch(resp)
 
 
 class IMAPIdleOperation(_IMAPSubOperation):
