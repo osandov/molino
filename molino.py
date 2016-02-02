@@ -9,7 +9,6 @@ import traceback
 
 import molino.cache
 import molino.config
-import molino.imap.parser
 import molino.operations
 import molino.view
 
@@ -44,10 +43,6 @@ if __name__ == '__main__':
         view = molino.view.View(config, stdscr, cache)
         main = molino.operations.MainOperation(config, cache, view)
         main.start()
-    except molino.imap.parser.IMAPParseError as e:
-        traceback.print_exc()
-        print(repr(e.buf), file=sys.stderr)
-        print(' ' * (len(repr(e.buf[:e.cursor])) - 2) + '^', file=sys.stderr)
     finally:
         if cache:
             cache.close()

@@ -5,7 +5,7 @@ import email.utils
 import locale
 import sqlite3
 
-from molino.imap.parser import TextBody, MessageBody, BasicBody, MultipartBody
+from imap4.parser import TextBody, MessageBody, BasicBody, MultipartBody
 
 
 class Cache:
@@ -517,13 +517,13 @@ def convert_bodystructure(s):
                         t[8], t[9])
     def recover_body(t):
         if t[0] == 'text':
-            return TextBody(*t)
+            return TextBody(t)
         elif t[0] == 'message' and t[1] == 'rfc822':
-            return MessageBody(*t[:7], recover_envelope(t[7]), recover_body(t[8]), *t[9:])
+            return MessageBody(t[:7] + (recover_envelope(t[7]), recover_body(t[8])) + t[9:])
         elif t[0] != 'multipart':
-            return BasicBody(*t)
+            return BasicBody(t)
         else:
-            return MultipartBody(*t[:2], [recover_body(part) for part in t[2]], *t[3:])
+            return MultipartBody(t[:2] + ([recover_body(part) for part in t[2]],) + t[3:])
     if s is None:
         return None
     else:

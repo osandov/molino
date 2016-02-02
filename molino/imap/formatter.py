@@ -1,8 +1,12 @@
 import codecs
 import re
 
-from molino.imap.parser import _astring_re, _list_re, _text_re
 import molino.imap.codecs
+
+
+_astring_re = re.compile(b'[^(){ %*"\\\\\x00-\x1f\x7f-\xff]+')
+_list_re = re.compile(b'[^(){ "\\\\\x00-\x1f\x7f-\xff]+')
+_text_re = re.compile(b'[^\x00\r\n\x7f-\xff]+')
 
 
 """

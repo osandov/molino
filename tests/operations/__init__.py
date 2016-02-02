@@ -6,10 +6,10 @@ import sqlite3
 import subprocess
 from unittest.mock import MagicMock, NonCallableMagicMock
 
+from imap4.parser import *
 from molino.callbackstack import CallbackStack
 from molino.cache import Cache
 from molino.operations import Operation
-from molino.imap.parser import *
 
 
 class MockMainOperation(Operation):

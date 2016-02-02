@@ -1,5 +1,11 @@
 /.coverage
+/build
 /htmlcov
+/molino.egg-info
 /molinorc
+/imap4/__init__.py
+/imap4/parser/tokens.c
+/imap4/parser/tokens.h
 *.pyc
+*.so
 __pycache__
