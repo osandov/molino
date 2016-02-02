@@ -1544,24 +1544,44 @@ class GmailFetchDisconnectedMessagesOperation(_GmailFetchMessagesOperation):
 
 
 class IMAPIdleOperation(_IMAPSubOperation):
-    def __init__(self, state):
+    def __init__(self, state, timeout=180):
         super().__init__(state)
         self._mailbox = state._mailbox
         self._uids = state._uids
         self._got_continue_req = False
         self._done = False
         self._refresh = False
+        self._timeout = timeout
+        self._timerfd = None
 
     def start(self):
         super().start()
         self.update_status('Idling', StatusLevel.info)
+
+        flags = timerfd.TFD_CLOEXEC | timerfd.TFD_NONBLOCK
+        self._timerfd = timerfd.TimerFD(flags=flags)
+        self._timerfd.settime(self._timeout)
+        self._main._sel.register(self._timerfd, selectors.EVENT_READ,
+                                 self._select_timer)
+
         self._enqueue_cmd(self._handle_tagged, 'IDLE')
         self._workqueue.wait_for_work(self._idle_done)
+
+    def done(self):
+        self._timerfd.close()
+        self._main._sel.unregister(self._timerfd)
+        super().done()
 
     def _idle_done(self):
         self._done = True
         if self._got_continue_req:
             self._imap.continue_cmd()
+
+    def _select_timer(self, mask):
+        self._timerfd.read()
+        if not self._done:
+            self._workqueue.cancel_wait(self._idle_done)
+            self._idle_done()
 
     @_continue_req_handler
     def _handle_continue_req(self):
