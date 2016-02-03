@@ -35,6 +35,28 @@ class TestIMAPScanner(unittest.TestCase):
         line = self.scanner.get()
         self.assertEqual(line, b'A002 BAD Failure\r\n')
 
+    def test_slice(self):
+        self.scanner.feed(b'A001 OK Success\r\n', 15)
+        self.assertRaises(ScanError, self.scanner.get)
+
+        self.scanner.feed(b'\r\n', 10)
+        line = self.scanner.get()
+        self.assertEqual(line, b'A001 OK Success\r\n')
+        self.scanner.consume(len(line))
+
+        self.scanner.feed(b'A001 OK Success\r\n', -2)
+        self.assertRaises(ScanError, self.scanner.get)
+
+        self.scanner.feed(b'\r\n', -2)
+        self.assertRaises(ScanError, self.scanner.get)
+
+        self.scanner.feed(b'\r\n', -10)
+        self.assertRaises(ScanError, self.scanner.get)
+
+        self.scanner.feed(b'\r\n', 2)
+        line = self.scanner.get()
+        self.assertEqual(line, b'A001 OK Success\r\n')
+
     def test_twice(self):
         self.scanner.feed(b'A001 OK Success\r\n')
         for i in range(2):

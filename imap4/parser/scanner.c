@@ -21,15 +21,32 @@ Scanner_dealloc(Scanner *self)
 }
 
 static PyObject *
-Scanner_feed(Scanner *self, PyObject *buf)
+Scanner_feed(Scanner *self, PyObject *args)
 {
+	PyObject *buf, *len_obj = NULL;
+	Py_ssize_t len;
 	Py_buffer view;
 	char *newbuf;
 
-	if (PyObject_GetBuffer(buf, &view, PyBUF_SIMPLE) < 0)
+	if (!PyArg_ParseTuple(args, "O|O", &buf, &len_obj))
 		return NULL;
 
-	self->buflen += view.len;
+	if (PyObject_GetBuffer(buf, &view, PyBUF_SIMPLE) < 0)
+		return NULL;
+	if (len_obj == NULL)
+		len = view.len;
+	else
+		len = PyLong_AsSsize_t(len_obj);
+	if (len > view.len) {
+		len = view.len;
+	} else if (len < 0) {
+		if (len < -view.len)
+			len = 0;
+		else
+			len = view.len + len;
+	}
+
+	self->buflen += len;
 	if (self->buflen > self->bufcap) {
 		newbuf = PyMem_RawRealloc(self->buf, self->buflen);
 		if (newbuf == NULL) {
@@ -40,7 +57,7 @@ Scanner_feed(Scanner *self, PyObject *buf)
 		self->bufcap = self->buflen;
 	}
 
-	memcpy(&self->buf[self->buflen - view.len], view.buf, view.len);
+	memcpy(&self->buf[self->buflen - len], view.buf, len);
 	PyBuffer_Release(&view);
 	Py_RETURN_NONE;
 }
@@ -126,7 +143,7 @@ Scanner_consume(Scanner *self, PyObject *n_obj)
 }
 
 static PyMethodDef Scanner_methods[] = {
-	{"feed", (PyCFunction)Scanner_feed, METH_O,
+	{"feed", (PyCFunction)Scanner_feed, METH_VARARGS,
 	 "Feed a buffer to the scanner"},
 	{"get", (PyCFunction)Scanner_get, METH_NOARGS,
 	 "Get a line from the scanner"},

@@ -522,7 +522,7 @@ class _IMAPConnectionOperation(MainSubOperation):
                 if n == 0:
                     self._sock_disconnected()
                     return
-                self._try_parse(self._recv_buf[:n])
+                self._try_parse(self._recv_buf, n)
             except BlockingIOError:
                 self._recv_want = selectors.EVENT_READ
                 break
@@ -547,8 +547,8 @@ class _IMAPConnectionOperation(MainSubOperation):
             handler(None, True)
         self.dec_pending()
 
-    def _try_parse(self, buf):
-        self._scanner.feed(buf)
+    def _try_parse(self, buf, n):
+        self._scanner.feed(buf, n)
         while True:
             try:
                 line = self._scanner.get()
