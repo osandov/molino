@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import curses
 import locale
 import logging
@@ -12,7 +10,8 @@ import molino.config
 import molino.operations
 import molino.view
 
-if __name__ == '__main__':
+
+def main():
     locale.setlocale(locale.LC_ALL, '')
     with open('molinorc', 'r') as f:
         config = molino.config.parse_config(f)
@@ -50,3 +49,7 @@ if __name__ == '__main__':
         curses.nocbreak()
         curses.echo()
         curses.endwin()
+
+
+if __name__ == '__main__':
+    main()

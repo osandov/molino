@@ -38,6 +38,9 @@ imap_parser_module = Extension('imap4.parser', sources=[
 setup(name='molino',
       version=1.0,
       description='Email client',
+      entry_points={
+          'console_scripts': ['molino=molino.__main__:main'],
+      },
       cmdclass={'build_ext': my_build_ext},
       ext_modules=[imap_parser_module],
       test_suite='tests',
