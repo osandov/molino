@@ -1,5 +1,6 @@
 import collections
 import enum
+import errno
 import logging
 import os
 import selectors
@@ -278,6 +279,14 @@ class IMAPWorkqueueOperation(MainSubOperation):
             self.selected = None
         self._queue.extendleft(reversed(stack))
 
+    def fail_all_work(self):
+        while self.have_work():
+            work = self.get_work()
+            if work.type == Work.Type.select or work.is_selected_state():
+                self.fail_selected_work(work)
+            else:
+                self.finish_work(work)
+
     def wait_for_work(self, callback):
         assert self._callback is None, self._callback
         self._callback = callback
@@ -379,15 +388,10 @@ class NotConnectedOperation(MainSubOperation):
         self.dec_pending()
 
     def _failure(self):
-        while self._workqueue.have_work():
-            work = self._workqueue.get_work()
-            if work.type == Work.Type.logout:
-                self.dec_pending()
-                return
-            elif work.type == Work.Type.select or work.is_selected_state():
-                self._workqueue.fail_selected_work(work)
-            else:
-                self._workqueue.finish_work(work)
+        self._workqueue.fail_all_work()
+        if self._workqueue._quit:
+            self.dec_pending()
+            return
         self._workqueue.wait_for_work(self._process_work)
 
 
@@ -419,18 +423,26 @@ class _IMAPConnectionOperation(MainSubOperation):
         self._send_queue = collections.deque()
 
         self._select_events = 0
+        self.disconnected = False
 
     # Connection state machine.
 
     def start(self):
         super().start()
+        # See issue #26273; TCP_USER_TIMEOUT isn't defined in the socket
+        # module.
+        self._sock.setsockopt(socket.IPPROTO_TCP, 18, 60000)
         self._start_greeting()
 
     def done(self):
         if self._select_events != 0:
             self._main._sel.unregister(self._sock)
         if self._sock:
-            self._sock.shutdown(socket.SHUT_RDWR)
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError as e:
+                if e.errno != errno.ENOTCONN:
+                    raise e
             self._sock.close()
         super().done()
 
@@ -503,15 +515,12 @@ class _IMAPConnectionOperation(MainSubOperation):
 
     def _try_recv(self):
         self._recv_want = 0
-        while True:
+        while not self.disconnected:
             try:
                 n = self._sock.recv_into(self._recv_buf)
                 # logging.debug('S: %s' % self._recv_buf[:n])
                 if n == 0:
-                    self.update_status('Disconnected', StatusLevel.error)
-                    if not self._workqueue._quit:
-                        NotConnectedOperation(self._workqueue).start()
-                    self.dec_pending()
+                    self._sock_disconnected()
                     return
                 self._try_parse(self._recv_buf[:n])
             except BlockingIOError:
@@ -523,7 +532,20 @@ class _IMAPConnectionOperation(MainSubOperation):
             except ssl.SSLWantWriteError:
                 self._recv_want = selectors.EVENT_WRITE
                 break
+            except TimeoutError:
+                self._sock_disconnected()
+                return
         self._modify_selector()
+
+    def _sock_disconnected(self):
+        self.update_status('Disconnected', StatusLevel.error)
+        self.disconnected = True
+        self._workqueue.fail_all_work()
+        if not self._workqueue._quit:
+            NotConnectedOperation(self._workqueue).start()
+        for handler in self._tagged_handlers.values():
+            handler(None, True)
+        self.dec_pending()
 
     def _try_parse(self, buf):
         self._scanner.feed(buf)
@@ -538,8 +560,7 @@ class _IMAPConnectionOperation(MainSubOperation):
             if isinstance(resp, imap4.parser.UntaggedResponse):
                 self._untagged_handlers[resp.type](resp)
             elif isinstance(resp, imap4.parser.TaggedResponse):
-                self._tagged_handlers[resp.tag](resp)
-                del self._tagged_handlers[resp.tag]
+                self._tagged_handlers.pop(resp.tag)(resp, False)
             elif isinstance(resp, imap4.parser.ContinueReq):
                 self._handle_continue_req()
             else:
@@ -547,7 +568,7 @@ class _IMAPConnectionOperation(MainSubOperation):
 
     def _try_send(self):
         self._send_want = 0
-        while True:
+        while not self.disconnected:
             if len(self._send_queue) == 0:
                 break
             send_buf, conts = self._send_queue[0]
@@ -570,6 +591,9 @@ class _IMAPConnectionOperation(MainSubOperation):
             except ssl.SSLWantWriteError:
                 self._send_want = selectors.EVENT_WRITE
                 break
+            except TimeoutError:
+                self._sock_disconnected()
+                return
         self._modify_selector()
 
     def _modify_selector(self):
@@ -809,7 +833,10 @@ class _IMAPOperation(MainSubOperation):
                 self._imap._handle_continue_req.unregister(attr)
         super().done()
 
-    def _handle_tagged(self, resp):
+    def _handle_tagged(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()
+            return
         if resp.type != imap4.OK:
             self._bad_response(resp)
         self.dec_pending()
@@ -885,7 +912,10 @@ class IMAPNotAuthenticatedState(_IMAPStateOperation):
         self._imap._capabilities = resp.data
         return True
 
-    def _handle_tagged_capability(self, resp):
+    def _handle_tagged_capability(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             if not self._imap.have_capability('IMAP4rev1'):
                 self.update_status('Server is missing IMAP4rev1 capability',
@@ -905,7 +935,10 @@ class IMAPNotAuthenticatedState(_IMAPStateOperation):
             self._bad_response(resp)
         self.dec_pending()
 
-    def _handle_tagged_login(self, resp):
+    def _handle_tagged_login(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             self.update_status('Login succeeded', StatusLevel.info)
             self.authed = True
@@ -935,11 +968,13 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
         super().done()
 
     def _process_work(self):
+        if self._imap.disconnected:
+            self.dec_pending()  # Exit state
         if self._workqueue.have_work():
             work = self._workqueue.get_work()
             if work.type == Work.Type.logout:
                 self.update_status('Logging out', StatusLevel.info)
-                self._enqueue_cmd(lambda op: self._handle_tagged_logout(op, work),
+                self._enqueue_cmd(lambda resp, dis: self._handle_tagged_logout(resp, dis, work),
                                   'LOGOUT')
             elif work.type == Work.Type.refresh_list:
                 list_op = IMAPListOperation(self)
@@ -950,14 +985,18 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
                 encoded_name = self._cache.mailbox_encoded_name(self._mailbox)
                 self.update_status('Selecting %s...' % self._mailbox,
                                    StatusLevel.info)
-                self._enqueue_cmd(lambda op: self._handle_tagged_select(op, work),
+                self._enqueue_cmd(lambda resp, dis: self._handle_tagged_select(resp, dis, work),
                                   'EXAMINE', encoded_name)
             else:
                 assert False, work.type
         else:
             self._workqueue.wait_for_work(self._process_work)
 
-    def _handle_tagged_logout(self, resp, work):
+    def _handle_tagged_logout(self, resp, disconnected, work):
+        if disconnected:
+            self.dec_pending()
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             self._workqueue.finish_work(work)
             self.dec_pending()  # Change state
@@ -971,7 +1010,11 @@ class _IMAPAuthenticatedState(_IMAPStateOperation):
         self._process_work()
         self.dec_pending()
 
-    def _handle_tagged_select(self, resp, work):
+    def _handle_tagged_select(self, resp, disconnected, work):
+        if disconnected:
+            self.dec_pending()
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             self._imap.select = None
             self._selected = True
@@ -1055,10 +1098,7 @@ class IMAPListOperation(_IMAPSubOperation):
                                     attributes=attributes)
         self._cache.add_listing_mailbox(name)
         if not self._list_status:
-            assert False, "TODO"  # XXX
-            #  if mailbox.name not in self._selected and mailbox.can_select():
-                #  self._enqueue_cmd(self._handle_tagged_status, 'STATUS', name,
-                                  #  'MESSAGES', 'UNSEEN')
+            assert False, "TODO"
         return True
 
     @_untagged_handler(imap4.STATUS)
@@ -1073,16 +1113,14 @@ class IMAPListOperation(_IMAPSubOperation):
                                    unseen=resp.data.status[imap4.UNSEEN])
         return True
 
-    def _handle_tagged_list(self, resp):
+    def _handle_tagged_list(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()
+            return
         if resp.type == imap4.OK:
             self._cache.delete_unlisted_mailboxes()
             self.update_status('Refreshed mailbox list', StatusLevel.info)
         else:
-            self._bad_response(resp)
-        self.dec_pending()
-
-    def _handle_tagged_status(self, resp):
-        if resp.type != imap4.OK:
             self._bad_response(resp)
         self.dec_pending()
 
@@ -1131,7 +1169,9 @@ class _IMAPSelectedState(_IMAPStateOperation):
         self.dec_pending()
 
     def _process_work(self):
-        if self._workqueue.have_work():
+        if self._imap.disconnected:
+            self.dec_pending()  # Exit state
+        elif self._workqueue.have_work():
             work = self._workqueue.get_work()
             if work.type == Work.Type.refresh_list:
                 list_op = IMAPListOperation(self, {self._mailbox})
@@ -1139,16 +1179,16 @@ class _IMAPSelectedState(_IMAPStateOperation):
                 list_op.start()
             elif work.type == Work.Type.close:
                 # TODO: when should we expunge instead?
-                self._enqueue_cmd(lambda resp: self._handle_tagged_close(resp, work),
+                self._enqueue_cmd(lambda resp, dis: self._handle_tagged_close(resp, dis, work),
                                   'CLOSE')
             elif work.type == Work.Type.fetch_bodystructure:
                 uid, = work.args
-                self._enqueue_cmd(lambda resp: self._handle_tagged_fetch(resp, work),
+                self._enqueue_cmd(lambda resp, dis: self._handle_tagged_fetch(resp, dis, work),
                                   'FETCH', [uid], 'BODYSTRUCTURE', uid=True)
             elif work.type == Work.Type.fetch_body_sections:
                 # TODO: partial fetches if too big/background downloads?
                 uid, sections = work.args
-                self._enqueue_cmd(lambda resp: self._handle_tagged_fetch(resp, work),
+                self._enqueue_cmd(lambda resp, dis: self._handle_tagged_fetch(resp, dis, work),
                                   'FETCH', [uid], *['BODY.PEEK[%s]' % section for section in sections], uid=True)
             else:
                 assert False
@@ -1168,7 +1208,11 @@ class _IMAPSelectedState(_IMAPStateOperation):
         self._process_work()
         self.dec_pending()
 
-    def _handle_tagged_close(self, resp, work):
+    def _handle_tagged_close(self, resp, disconnected, work):
+        if disconnected:
+            self.dec_pending()
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             self._closed = True
             self._workqueue.finish_work(work)
@@ -1178,13 +1222,12 @@ class _IMAPSelectedState(_IMAPStateOperation):
         else:
             assert False
         self.dec_pending()
-        return True
 
     def _gmail_hack(self, resp, work=None):
-        self._enqueue_cmd(lambda resp2: self._handle_gmail_hack(resp2, resp, work),
+        self._enqueue_cmd(lambda resp2, dis: self._handle_gmail_hack(resp2, resp, dis, work),
                           'CHECK')
 
-    def _handle_gmail_hack(self, resp, orig_resp, orig_work):
+    def _handle_gmail_hack(self, resp, orig_resp, disconnected, orig_work):
         # XXX: At the time of this writing on 11/15/15, if the selected mailbox
         # gets deleted, Gmail will kick you out of the Selected state into the
         # Authenticated state as soon as you execute a NOOP or IDLE command
@@ -1192,6 +1235,10 @@ class _IMAPSelectedState(_IMAPStateOperation):
         # state will result in a BAD response. So, when we get a BAD response,
         # we're forced to assume that this is the case and try a CHECK to
         # verify that this is what happened.
+        if disconnected:
+            self.dec_pending()
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             # If CHECK succeeded, the previous response was a legitimate BAD
             # response
@@ -1212,7 +1259,11 @@ class _IMAPSelectedState(_IMAPStateOperation):
         self.dec_pending()
         return True
 
-    def _handle_tagged_fetch(self, resp, work):
+    def _handle_tagged_fetch(self, resp, disconnected, work):
+        if disconnected:
+            self.dec_pending()
+            self.dec_pending()  # Exit state
+            return
         if resp.type == imap4.OK:
             self._workqueue.finish_work(work)
             self._process_work()
@@ -1418,13 +1469,15 @@ class IMAPPopulateEsearchOperation(_IMAPSubOperation):
         else:
             return False
 
-    def _handle_tagged_search(self, resp):
+    def _handle_tagged_search(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()
+            return
         if resp.type == imap4.BAD:
             self.bad = resp
         elif resp.type != imap4.OK:
             assert False, "TODO"
         self.dec_pending()
-        return True
 
 
 class _GmailFetchMessagesOperation(_IMAPSubOperation):
@@ -1440,7 +1493,10 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
         self._cache.commit()
         super().done()
 
-    def _handle_tagged_fetch_gm_msgids(self, resp):
+    def _handle_tagged_fetch_gm_msgids(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()
+            return
         if resp.type == imap4.BAD:
             self.bad = resp
             self.dec_pending()
@@ -1458,9 +1514,11 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
             self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS',
                               uid=True)
         self.dec_pending()
-        return True
 
-    def _handle_tagged_fetch_envelopes(self, resp):
+    def _handle_tagged_fetch_envelopes(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()
+            return
         if resp.type == imap4.BAD:
             self.bad = resp
             self.dec_pending()
@@ -1469,7 +1527,6 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
             assert False, "TODO"
         self.new_fetched = self._cache.add_fetching_uids()
         self.dec_pending()
-        return True
 
     @_untagged_handler(imap4.EXPUNGE)
     def _handle_expunge(self, resp):
