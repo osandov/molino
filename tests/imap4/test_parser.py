@@ -347,6 +347,8 @@ Message-ID: <1234@local.machine.example>
                    UntaggedResponse([ESEARCH, Esearch(['A283', False, {ALL: [2, (10, 11)]}])]))
         self._test(b'* ESEARCH (TAG "A285") UID MIN 7 MAX 3800\r\n',
                    UntaggedResponse([ESEARCH, Esearch(['A285', True, {MIN: 7, MAX: 3800}])]))
+        self._test(b'* ESEARCH (TAG "a2") MAX 23 MODSEQ 907162321\r\n',
+                   UntaggedResponse([ESEARCH, Esearch(['a2', False, {MAX: 23, MODSEQ: 907162321}])]))
 
     def test_list(self):
         self._test(b'* LIST (\\HasNoChildren) "/" INBOX\r\n',

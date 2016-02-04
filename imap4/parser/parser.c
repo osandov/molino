@@ -1434,6 +1434,7 @@ parse_esearch_response(Py_buffer *view, Py_ssize_t *cur)
 		case IMAP4_COUNT:
 		case IMAP4_MAX:
 		case IMAP4_MIN:
+		case IMAP4_MODSEQ:
 			EXPECTC(' ');
 			value = parse_number(view, cur);
 			if (value == NULL)
