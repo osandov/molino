@@ -227,8 +227,47 @@ def format_search(buffer, tag, *criteria, uid=False, esearch=None):
     uid - use UID SEARCH to use unique identifiers instead of sequence numbers
     criteria - tuples representing search criteria as follows:
 
-    ALL: (no arguments) all messages in mailbox
-    UNSEEN: (no arguments) messages that do not have the \\Seen flag set
+    ALL: all messages in mailbox
+    ANSWERED: messages that have the \\Answered flag set
+    BEFORE <date>: messages whose internal date is earlier than the specified date
+    BCC <string>: messages with the given string in the Bcc field
+    BODY <string>: messages with the given string in the message body
+    CC <string>: messages with the given string in the Cc field
+    DELETED: messages that have the \\Deleted flag set
+    DRAFT: messages that have the \\Draft flag set
+    FLAGGED: messages that have the \\Flagged flag set
+    FROM <string>: messages with the given string in the From field
+    HEADER <field-name> <string>: messages with the given string in the given field
+    KEYWORD <string>: messages with the given keyword flag set
+    LARGER <n>: messages larger than the given number of octets
+    MODSEQ <n>: messages with a CONDSTORE modification value greater than the given value
+    NEW: messages that have the \\Recent flag set but not the \\Seen flag
+    NOT <search-key>: messages that do not match the specified search key
+    OLD: messages that do not have the \\Recent flag set
+    ON <date>: messages whose internal date is on the given date
+    OR <search-key1> <search-key2>: messages that match either search key
+    RECENT: messages that have the \\Recent flag set
+    SEEN: messages that have the \\Seen flag set
+    SENTBEFORE <date>: messages whose Date header is earlier than the given date
+    SENTON <date>: messages whose Date header is on the given date
+    SENTSINCE <date>: messages whose Date header is on or later than the given date
+    SINCE <date>: messages whose internal date is on or later than the given date
+    SMALLER <n>: messages smaller than the given number of octets
+    SUBJECT <string>: messages with the given string in the Subject field
+    TEXT <string>: messages with the given string in the message header or body
+    TO <string>: messages with the given string in the To field
+    UID <sequence set>: messages with unique identifiers in the given sequence set
+    UNANSWERED: messages that do not have the \\Answered flag set
+    UNDELETED: messages that do not have the \\Deleted flag set
+    UNDRAFT: messages that do not have the \\Draft flag set
+    UNFLAGGED: messages that do not have the \\Flagged flag set
+    UNKEYWORD <string>: messages that do not have the given keyword flag set
+    UNSEEN: messages that do not have the \\Seen flag set
+    X-GM-RAW <string>: messages matching the given Gmail search syntax
+    seq <sequence set>: messages with message sequence numbers in the given sequence set
+
+    Not implemented: BEFORE <date>, ON <date>, SENTBEFORE <date>, SENTON <date>,
+    SENTSINCE <date>, SINCE <date>, UID
 
     esearch - iterable of strings controlling what is returned with the ESEARCH
     capability; an empty iterable is equivalent to an iterable containing only
@@ -242,18 +281,62 @@ def format_search(buffer, tag, *criteria, uid=False, esearch=None):
     conts = _format_common(buffer, tag, 'UID SEARCH' if uid else 'SEARCH')
     if esearch is not None:
         buffer.extend(b' RETURN (%b)' % b' '.join(s.encode('ascii') for s in esearch))
-    for c in criteria:
-        key, args = c[0], c[1:]
-        if key == 'ALL':
-            assert len(args) == 0
-            buffer.extend(b' ALL')
-        elif key == 'UNSEEN':
-            assert len(args) == 0
-            buffer.extend(b' UNSEEN')
-        else:
-            raise ValueError('Unknown SEARCH criteria "%s"' % key)
+    for key in criteria:
+        _format_search_key(buffer, conts, key)
     buffer.extend(b'\r\n')
     return conts
+
+
+def _format_search_key(buffer, conts, key):
+    if key[0] in ['ALL', 'ANSWERED', 'DELETED', 'DRAFT', 'FLAGGED', 'NEW',
+                  'OLD', 'RECENT', 'SEEN', 'UNANSWERED', 'UNDELETED',
+                  'UNDRAFT', 'UNFLAGGED', 'UNSEEN']:
+        assert len(key) == 1
+        buffer.extend(b' %b' % key[0].encode('ascii'))
+    elif key[0] in ['BEFORE', 'ON', 'SENTBEFORE', 'SENTON', 'SENTSINCE', 'SINCE']:
+        assert len(key) == 2
+        buffer.extend(b' %b ' % key[0].encode('ascii'))
+        buffer.extend(key[1].strftime('%d-%b-%Y').encode('ascii'))
+    elif key[0] in ['BCC', 'BODY', 'CC', 'FROM', 'SUBJECT', 'TEXT', 'TO']:
+        assert len(key) == 2
+        buffer.extend(b' %b ' % key[0].encode('ascii'))
+        format_astring(buffer, conts, key[1].encode('ascii'))
+    elif key[0] == 'HEADER':
+        assert len(key) == 3
+        buffer.extend(b' %b ' % key[0].encode('ascii'))
+        format_astring(buffer, conts, key[1].encode('ascii'))
+        buffer.extend(b' ')
+        format_astring(buffer, conts, key[2].encode('ascii'))
+    elif key[0] in ['KEYWORD', 'UNKEYWORD']:
+        assert len(key) == 2
+        buffer.extend(b' %b ' % key[0].encode('ascii'))
+        format_ascii_atom(buffer, conts, key[1])
+    elif key[0] in ['LARGER', 'MODSEQ', 'SMALLER']:
+        assert len(key) == 2
+        buffer.extend(b' %b %d' % (key[0].encode('ascii'), key[1]))
+    elif key[0] == 'NOT':
+        assert len(key) == 2
+        buffer.extend(b' NOT')
+        _format_search_key(buffer, conts, key[1])
+    elif key[0] == 'OR':
+        assert len(key) == 3
+        buffer.extend(b' OR')
+        _format_search_key(buffer, conts, key[1])
+        _format_search_key(buffer, conts, key[2])
+    elif key[0] == 'UID':
+        assert len(key) == 2
+        buffer.extend(b' UID ')
+        buffer.extend(key[1].encode('ascii'))
+    elif key[0] == 'X-GM-RAW':
+        assert len(key) == 2
+        buffer.extend(b' X-GM-RAW ')
+        _format_string(buffer, conts, key[1].encode('ascii'))
+    elif key[0] == 'seq':
+        assert len(key) == 2
+        buffer.extend(b' ')
+        buffer.extend(key[1].encode('ascii'))
+    else:
+        raise ValueError('Unknown SEARCH criteria "%s"' % key)
 
 
 def format_select(buffer, tag, mailbox):

@@ -1,3 +1,4 @@
+import datetime
 import unittest
 
 from molino.imap.formatter import *
@@ -138,10 +139,6 @@ class TestFormat(unittest.TestCase):
         self.assertEqual(conts, [])
 
     def test_search(self):
-        conts = format_search(self.buffer, 'A001', ('ALL',))
-        self.assertEqual(self.buffer, b'A001 SEARCH ALL\r\n')
-        self.assertEqual(conts, [])
-
         self.buffer.clear()
         conts = format_search(self.buffer, 'A001', ('ALL',), uid=True)
         self.assertEqual(self.buffer, b'A001 UID SEARCH ALL\r\n')
@@ -164,6 +161,203 @@ class TestFormat(unittest.TestCase):
         self.buffer.clear()
         conts = format_search(self.buffer, 'A001', ('UNSEEN',), esearch=('MIN', 'COUNT'))
         self.assertEqual(self.buffer, b'A001 SEARCH RETURN (MIN COUNT) UNSEEN\r\n')
+        self.assertEqual(conts, [])
+
+        # Test all of the search keys
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('seq', '1:*'))
+        self.assertEqual(self.buffer, b'A001 SEARCH 1:*\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('ALL',))
+        self.assertEqual(self.buffer, b'A001 SEARCH ALL\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('ANSWERED',))
+        self.assertEqual(self.buffer, b'A001 SEARCH ANSWERED\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('BEFORE', datetime.datetime(1999, 6, 29)))
+        self.assertEqual(self.buffer, b'A001 SEARCH BEFORE 29-Jun-1999\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('BCC', "foo"))
+        self.assertEqual(self.buffer, b'A001 SEARCH BCC foo\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('BODY', "foo bar"))
+        self.assertEqual(self.buffer, b'A001 SEARCH BODY "foo bar"\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('CC', "foo"))
+        self.assertEqual(self.buffer, b'A001 SEARCH CC foo\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('DELETED',))
+        self.assertEqual(self.buffer, b'A001 SEARCH DELETED\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('DRAFT',))
+        self.assertEqual(self.buffer, b'A001 SEARCH DRAFT\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('FLAGGED',))
+        self.assertEqual(self.buffer, b'A001 SEARCH FLAGGED\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('FROM', "foo"))
+        self.assertEqual(self.buffer, b'A001 SEARCH FROM foo\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('HEADER', "User-Agent", "Mutt"))
+        self.assertEqual(self.buffer, b'A001 SEARCH HEADER User-Agent Mutt\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('KEYWORD', "$Phishing"))
+        self.assertEqual(self.buffer, b'A001 SEARCH KEYWORD $Phishing\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('LARGER', 1024))
+        self.assertEqual(self.buffer, b'A001 SEARCH LARGER 1024\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('MODSEQ', 1337))
+        self.assertEqual(self.buffer, b'A001 SEARCH MODSEQ 1337\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('NEW',))
+        self.assertEqual(self.buffer, b'A001 SEARCH NEW\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('NOT', ('OLD',)))
+        self.assertEqual(self.buffer, b'A001 SEARCH NOT OLD\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('NOT', ('LARGER', 1024)))
+        self.assertEqual(self.buffer, b'A001 SEARCH NOT LARGER 1024\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('OLD',))
+        self.assertEqual(self.buffer, b'A001 SEARCH OLD\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('ON', datetime.datetime(1999, 7, 8)))
+        self.assertEqual(self.buffer, b'A001 SEARCH ON 08-Jul-1999\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('OR', ('OLD',), ('LARGER', 1024)))
+        self.assertEqual(self.buffer, b'A001 SEARCH OR OLD LARGER 1024\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('RECENT',))
+        self.assertEqual(self.buffer, b'A001 SEARCH RECENT\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SEEN',))
+        self.assertEqual(self.buffer, b'A001 SEARCH SEEN\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SENTBEFORE', datetime.datetime(1999, 11, 1)))
+        self.assertEqual(self.buffer, b'A001 SEARCH SENTBEFORE 01-Nov-1999\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SENTON', datetime.datetime(2002, 10, 15)))
+        self.assertEqual(self.buffer, b'A001 SEARCH SENTON 15-Oct-2002\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SENTSINCE', datetime.datetime(1998, 5, 20)))
+        self.assertEqual(self.buffer, b'A001 SEARCH SENTSINCE 20-May-1998\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SINCE', datetime.datetime(1970, 1, 1)))
+        self.assertEqual(self.buffer, b'A001 SEARCH SINCE 01-Jan-1970\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SMALLER', 1024))
+        self.assertEqual(self.buffer, b'A001 SEARCH SMALLER 1024\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('SUBJECT', "foo bar"))
+        self.assertEqual(self.buffer, b'A001 SEARCH SUBJECT "foo bar"\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('TEXT', "foo bar"))
+        self.assertEqual(self.buffer, b'A001 SEARCH TEXT "foo bar"\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('TO', "foo"))
+        self.assertEqual(self.buffer, b'A001 SEARCH TO foo\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UID', '1,3:6,8:*'))
+        self.assertEqual(self.buffer, b'A001 SEARCH UID 1,3:6,8:*\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNANSWERED',))
+        self.assertEqual(self.buffer, b'A001 SEARCH UNANSWERED\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNDELETED',))
+        self.assertEqual(self.buffer, b'A001 SEARCH UNDELETED\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNDRAFT',))
+        self.assertEqual(self.buffer, b'A001 SEARCH UNDRAFT\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNFLAGGED',))
+        self.assertEqual(self.buffer, b'A001 SEARCH UNFLAGGED\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNKEYWORD', "$Phishing"))
+        self.assertEqual(self.buffer, b'A001 SEARCH UNKEYWORD $Phishing\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('UNSEEN',))
+        self.assertEqual(self.buffer, b'A001 SEARCH UNSEEN\r\n')
+        self.assertEqual(conts, [])
+
+        self.buffer.clear()
+        conts = format_search(self.buffer, 'A001', ('X-GM-RAW', 'has:attachment'))
+        self.assertEqual(self.buffer, b'A001 SEARCH X-GM-RAW "has:attachment"\r\n')
         self.assertEqual(conts, [])
 
     def test_select(self):
