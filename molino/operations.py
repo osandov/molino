@@ -1125,6 +1125,18 @@ class IMAPListOperation(_IMAPSubOperation):
         self.dec_pending()
 
 
+GMAIL_SPECIAL_LABELS = {
+    'INBOX': {b'\\Inbox'},
+    '[Gmail]/All Mail': set(),
+    '[Gmail]/Drafts': {b'\\Drafts'},
+    '[Gmail]/Important': {b'\\Important'},
+    '[Gmail]/Sent Mail': {b'\\Sent'},
+    '[Gmail]/Spam': {b'\\Spam'},
+    '[Gmail]/Starred': {b'\\Starred'},
+    '[Gmail]/Trash': {b'\\Trash'},
+}
+
+
 class _IMAPSelectedState(_IMAPStateOperation):
     """
     IMAP Selected state.
@@ -1136,6 +1148,7 @@ class _IMAPSelectedState(_IMAPStateOperation):
         self._gmail = self._imap.have_capability('X-GM-EXT-1')
         self._idle = self._imap.have_capability('IDLE')
         self._esearch = self._imap.have_capability('ESEARCH')
+        self._mailbox_labels = None
         self._uids = None
         self._unseen = None
         self._fetching_cursor = None
@@ -1146,6 +1159,17 @@ class _IMAPSelectedState(_IMAPStateOperation):
     def start(self):
         super().start()
         self.inc_pending()  # Until we change state
+        if self._gmail:
+            # XXX: For some reason, Gmail omits the label for the currently
+            # selected mailbox when fetching X-GM-LABELS, so we have to add it
+            # back in. Gmail's special folders have special labels, and the
+            # only way to get those is with XLIST, which Google's own
+            # documentation discourages using, which means that we have to
+            # hard-code them.
+            if self._mailbox == 'INBOX' or self._mailbox.startswith('[Gmail]'):
+                self._mailbox_labels = GMAIL_SPECIAL_LABELS[self._mailbox]
+            else:
+                self._mailbox_labels = {self._cache.mailbox_encoded_name(self._mailbox)}
         self.update_status('Selected %s' % self._mailbox, StatusLevel.info)
         assert self._esearch, "TODO"
         search_op = IMAPPopulateEsearchOperation(self)
@@ -1391,6 +1415,9 @@ class _IMAPSelectedState(_IMAPStateOperation):
             if len(self._unseen) != old_unseen:
                 self._cache.update_mailbox(self._mailbox, unseen=len(self._unseen))
                 want_commit = True
+        if imap4.X_GM_LABELS in fetch.items:
+            update['labels'] = fetch.items[imap4.X_GM_LABELS]
+            update['labels'].update(self._mailbox_labels)
         if imap4.BODYSECTIONS in fetch.items:
             bodysections = fetch.items[imap4.BODYSECTIONS]
             self._cache.add_body_sections_by_uid(self._mailbox, uid, bodysections)
@@ -1508,11 +1535,12 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
             self._new_gm_msgids = new
             seq_set = imap.sequence_set(new)
             self._enqueue_cmd(self._handle_tagged_fetch_envelopes,
-                              'FETCH', seq_set, 'ENVELOPE', 'FLAGS', uid=True)
+                              'FETCH', seq_set, 'ENVELOPE', 'FLAGS',
+                              'X-GM-LABELS', uid=True)
         if old:
             seq_set = imap.sequence_set(old)
             self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS',
-                              uid=True)
+                              'X-GM-LABELS', uid=True)
         self.dec_pending()
 
     def _handle_tagged_fetch_envelopes(self, resp, disconnected):
@@ -1545,8 +1573,11 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
             uid = fetch.items.pop(imap4.UID)
             envelope = fetch.items.pop(imap4.ENVELOPE)
             flags = fetch.items.pop(imap4.FLAGS)
+            labels = fetch.items.pop(imap4.X_GM_LABELS)
+            labels.update(self._state._mailbox_labels)
             gm_msgid = self._new_gm_msgids[uid]
-            self._cache.add_message_with_envelope(gm_msgid, envelope, flags=flags)
+            self._cache.add_message_with_envelope(gm_msgid, envelope,
+                                                  flags=flags, labels=labels)
             return True
         else:
             return False
@@ -1593,7 +1624,8 @@ class GmailFetchDisconnectedMessagesOperation(_GmailFetchMessagesOperation):
         if old:
             seq_set = imap.sequence_set(old)
             self._enqueue_cmd(self._handle_tagged,
-                              'FETCH', seq_set, 'FLAGS', uid=True)
+                              'FETCH', seq_set, 'FLAGS', 'X-GM-LABELS',
+                              uid=True)
 
     @_untagged_handler(imap4.FETCH)
     def _handle_fetch(self, resp):

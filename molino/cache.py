@@ -56,7 +56,8 @@ class Cache:
             in_reply_to TEXT,
             message_id TEXT,
             bodystructure TEXT,
-            flags TEXT NOT NULL
+            flags TEXT NOT NULL,
+            labels TEXT NOT NULL
         )''')
 
         # Message bodies
@@ -154,6 +155,11 @@ class Cache:
                               (name,))
         return cur.fetchone()[0]
 
+    def get_mailbox_attributes(self, name):
+        cur = self.db.execute('SELECT attributes FROM mailboxes WHERE name=?',
+                              (name,))
+        return convert_flags(cur.fetchone()[0])
+
     def get_mailbox_exists(self, name):
         cur = self.db.execute('SELECT "exists" FROM mailboxes WHERE name=?',
                               (name,))
@@ -186,17 +192,18 @@ class Cache:
     def add_message(self, gm_msgid, *, date, subject=None, from_=None,
                     sender=None, reply_to=None, to=None, cc=None, bcc=None,
                     in_reply_to=None, message_id=None, bodystructure=None,
-                    flags):
+                    flags, labels):
         timestamp, timezone = adapt_date(date)
         self.db.execute('''
-        INSERT INTO gmail_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO gmail_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (gm_msgid, timestamp, timezone, subject, adapt_addrs(from_),
               adapt_addrs(sender), adapt_addrs(reply_to), adapt_addrs(to),
               adapt_addrs(cc), adapt_addrs(bcc), in_reply_to, message_id,
-              adapt_bodystructure(bodystructure), adapt_flags(flags)))
+              adapt_bodystructure(bodystructure), adapt_flags(flags),
+              adapt_labels(labels)))
 
     def add_message_with_envelope(self, gm_msgid, envelope, *,
-                                  bodystructure=None, flags):
+                                  bodystructure=None, flags, labels):
         def decode_header(b):
             if b is None:
                 return None
@@ -245,13 +252,15 @@ class Cache:
                          bcc=envelope_addrs(envelope.bcc),
                          in_reply_to=decode_header(envelope.in_reply_to),
                          message_id=decode_header(envelope.message_id),
-                         bodystructure=bodystructure, flags=flags)
+                         bodystructure=bodystructure, flags=flags,
+                         labels=labels)
 
     def delete_message(self, gm_msgid):
         self.db.execute('DELETE FROM gmail_messages WHERE gm_msgid=?',
                         (gm_msgid,))
 
-    def update_message(self, gm_msgid, *, bodystructure=None, flags=None):
+    def update_message(self, gm_msgid, *, bodystructure=None, flags=None,
+                       labels=None):
         cols = []
         params = []
         if bodystructure is not None:
@@ -260,12 +269,16 @@ class Cache:
         if flags is not None:
             cols.append('flags=?')
             params.append(adapt_flags(flags))
+        if labels is not None:
+            cols.append('labels=?')
+            params.append(adapt_labels(labels))
         assert len(params) > 0
         params.append(gm_msgid)
         self.db.execute('UPDATE gmail_messages SET ' + ', '.join(cols) + ' WHERE gm_msgid=?',
                         params)
 
-    def update_message_by_uid(self, mailbox, uid, *, bodystructure=None, flags=None):
+    def update_message_by_uid(self, mailbox, uid, *, bodystructure=None,
+                              flags=None, labels=None):
         cols = []
         params = []
         if bodystructure is not None:
@@ -274,6 +287,9 @@ class Cache:
         if flags is not None:
             cols.append('flags=?')
             params.append(adapt_flags(flags))
+        if labels is not None:
+            cols.append('labels=?')
+            params.append(adapt_labels(labels))
         assert len(params) > 0
         params.append(mailbox)
         params.append(uid)
@@ -528,3 +544,14 @@ def convert_bodystructure(s):
         return None
     else:
         return recover_body(ast.literal_eval(s))
+
+
+def adapt_labels(labels):
+    return b','.join(sorted(labels)).decode('ascii')
+
+
+def convert_labels(s):
+    if s == '':
+        return set()
+    else:
+        return set(s.encode('ascii').split(b','))
