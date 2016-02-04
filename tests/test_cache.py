@@ -205,7 +205,7 @@ class TestGmailMessages(unittest.TestCase):
             cc=['cc@example.com'], bcc=['bcc@example.com'],
             in_reply_to='<1234@example.com>', message_id='<1235@example.com>',
             bodystructure=None, flags={'\\Seen', '\\Answered'},
-            labels={b'\\Inbox'}
+            labels={b'\\Inbox'}, modseq=1
         )
         self.cache.commit()
         self.check_db([
@@ -213,18 +213,19 @@ class TestGmailMessages(unittest.TestCase):
              '"Jane Doe" <jane@example.org>', '"Jane Doe" <jane@example.com>',
              '"John Doe" <john@example.com>\nexample@example.com',
              'cc@example.com', 'bcc@example.com', '<1234@example.com>',
-             '<1235@example.com>', None, '\\Answered,\\Seen', '\\Inbox'),
+             '<1235@example.com>', None, '\\Answered,\\Seen', '\\Inbox', 1)
         ])
 
     def test_delete(self):
         timestamp = int(time.time())
         date = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
-        self.cache.add_message(1337, date=date, flags={}, labels=set())
-        self.cache.add_message(404, date=date, flags={}, labels=set())
+        self.cache.add_message(1337, date=date, flags={}, labels=set(), modseq=1)
+        self.cache.add_message(404, date=date, flags={}, labels=set(), modseq=2)
         self.cache.delete_message(1337)
         self.cache.commit()
         self.check_db([
-            (404, timestamp, 0, None, None, None, None, None, None, None, None, None, None, '', ''),
+            (404, timestamp, 0, None, None, None, None, None, None, None, None,
+             None, None, '', '', 2),
         ])
 
     def test_update(self):
@@ -239,17 +240,17 @@ class TestGmailMessages(unittest.TestCase):
             to=['"John Doe" <john@example.com>', 'example@example.com'],
             cc=['cc@example.com'], bcc=['bcc@example.com'],
             in_reply_to='<1234@example.com>', message_id='<1235@example.com>',
-            bodystructure=None, flags={'\\Answered'}, labels=set(),
+            bodystructure=None, flags={'\\Answered'}, labels=set(), modseq=1
         )
         self.cache.update_message(1337, flags={'\\Seen', '\\Answered'},
-                                  labels={b'foo', b'bar'})
+                                  labels={b'foo', b'bar'}, modseq=2)
         self.cache.commit()
         self.check_db([
             (1337, timestamp, 0, 'Re: X', '"Jane Doe" <jane@example.com>',
              '"Jane Doe" <jane@example.org>', '"Jane Doe" <jane@example.com>',
              '"John Doe" <john@example.com>\nexample@example.com',
              'cc@example.com', 'bcc@example.com', '<1234@example.com>',
-             '<1235@example.com>', None, '\\Answered,\\Seen', 'bar,foo'),
+             '<1235@example.com>', None, '\\Answered,\\Seen', 'bar,foo', 2),
         ])
 
 
@@ -273,7 +274,7 @@ class TestGmailMailboxUIDs(unittest.TestCase):
 
     def test_add(self):
         date = datetime.datetime.now(datetime.timezone.utc)
-        self.cache.add_message(1337, date=date, flags={}, labels=set())
+        self.cache.add_message(1337, date=date, flags={}, labels=set(), modseq=1)
         self.cache.add_mailbox_uid('INBOX', 1, 1337)
         self.cache.commit()
         self.check_db([
@@ -282,7 +283,7 @@ class TestGmailMailboxUIDs(unittest.TestCase):
 
     def test_delete(self):
         date = datetime.datetime.now(datetime.timezone.utc)
-        self.cache.add_message(1337, date=date, flags={}, labels=set())
+        self.cache.add_message(1337, date=date, flags={}, labels=set(), modseq=1)
         self.cache.add_mailbox_uid('INBOX', 1, 1337)
         self.cache.delete_mailbox_uid('INBOX', 1)
         self.cache.commit()
@@ -291,7 +292,7 @@ class TestGmailMailboxUIDs(unittest.TestCase):
     def test_date(self):
         timestamp = int(time.time())
         date = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
-        self.cache.add_message(1337, date=date, flags={}, labels=set())
+        self.cache.add_message(1337, date=date, flags={}, labels=set(), modseq=1)
         self.cache.add_mailbox_uid('INBOX', 1, 1337)
         self.cache.commit()
         self.check_db([

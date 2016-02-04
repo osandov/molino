@@ -57,7 +57,8 @@ class Cache:
             message_id TEXT,
             bodystructure TEXT,
             flags TEXT NOT NULL,
-            labels TEXT NOT NULL
+            labels TEXT NOT NULL,
+            modseq INTEGER NOT NULL
         )''')
 
         # Message bodies
@@ -192,18 +193,18 @@ class Cache:
     def add_message(self, gm_msgid, *, date, subject=None, from_=None,
                     sender=None, reply_to=None, to=None, cc=None, bcc=None,
                     in_reply_to=None, message_id=None, bodystructure=None,
-                    flags, labels):
+                    flags, labels, modseq):
         timestamp, timezone = adapt_date(date)
         self.db.execute('''
-        INSERT INTO gmail_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO gmail_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (gm_msgid, timestamp, timezone, subject, adapt_addrs(from_),
               adapt_addrs(sender), adapt_addrs(reply_to), adapt_addrs(to),
               adapt_addrs(cc), adapt_addrs(bcc), in_reply_to, message_id,
               adapt_bodystructure(bodystructure), adapt_flags(flags),
-              adapt_labels(labels)))
+              adapt_labels(labels), modseq))
 
     def add_message_with_envelope(self, gm_msgid, envelope, *,
-                                  bodystructure=None, flags, labels):
+                                  bodystructure=None, flags, labels, modseq):
         def decode_header(b):
             if b is None:
                 return None
@@ -253,14 +254,14 @@ class Cache:
                          in_reply_to=decode_header(envelope.in_reply_to),
                          message_id=decode_header(envelope.message_id),
                          bodystructure=bodystructure, flags=flags,
-                         labels=labels)
+                         labels=labels, modseq=modseq)
 
     def delete_message(self, gm_msgid):
         self.db.execute('DELETE FROM gmail_messages WHERE gm_msgid=?',
                         (gm_msgid,))
 
     def update_message(self, gm_msgid, *, bodystructure=None, flags=None,
-                       labels=None):
+                       labels=None, modseq=None):
         cols = []
         params = []
         if bodystructure is not None:
@@ -272,13 +273,16 @@ class Cache:
         if labels is not None:
             cols.append('labels=?')
             params.append(adapt_labels(labels))
+        if modseq is not None:
+            cols.append('modseq=?')
+            params.append(modseq)
         assert len(params) > 0
         params.append(gm_msgid)
         self.db.execute('UPDATE gmail_messages SET ' + ', '.join(cols) + ' WHERE gm_msgid=?',
                         params)
 
     def update_message_by_uid(self, mailbox, uid, *, bodystructure=None,
-                              flags=None, labels=None):
+                              flags=None, labels=None, modseq):
         cols = []
         params = []
         if bodystructure is not None:
@@ -290,6 +294,9 @@ class Cache:
         if labels is not None:
             cols.append('labels=?')
             params.append(adapt_labels(labels))
+        if modseq is not None:
+            cols.append('modseq=?')
+            params.append(modseq)
         assert len(params) > 0
         params.append(mailbox)
         params.append(uid)

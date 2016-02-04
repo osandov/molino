@@ -901,6 +901,7 @@ class IMAPNotAuthenticatedState(_IMAPStateOperation):
         super().__init__(imap)
         self._user = user
         self._password = password
+        self._enabled = None
         self.authed = False
 
     def start(self):
@@ -910,6 +911,11 @@ class IMAPNotAuthenticatedState(_IMAPStateOperation):
     @_untagged_handler(imap4.CAPABILITY)
     def _handle_capability(self, resp):
         self._imap._capabilities = resp.data
+        return True
+
+    @_untagged_handler(imap4.ENABLED)
+    def _handle_enabled(self, resp):
+        self._enabled = resp.data
         return True
 
     def _handle_tagged_capability(self, resp, disconnected):
@@ -941,9 +947,22 @@ class IMAPNotAuthenticatedState(_IMAPStateOperation):
             return
         if resp.type == imap4.OK:
             self.update_status('Login succeeded', StatusLevel.info)
-            self.authed = True
+            assert self._imap.have_capability('CONDSTORE'), "TODO"
+            self._enqueue_cmd(self._handle_tagged_enable, 'ENABLE', 'CONDSTORE')
         else:
             self.update_status('Login failed', StatusLevel.error)
+        self.dec_pending()
+
+    def _handle_tagged_enable(self, resp, disconnected):
+        if disconnected:
+            self.dec_pending()  # Exit state
+            return
+        if resp.type == imap4.OK:
+            assert 'CONDSTORE' in self._enabled
+            self.authed = True
+        else:
+            self.update_status('Login failed (could not enable capabilities)',
+                               StatusLevel.error)
         self.dec_pending()
 
 
@@ -1422,6 +1441,8 @@ class _IMAPSelectedState(_IMAPStateOperation):
             bodysections = fetch.items[imap4.BODYSECTIONS]
             self._cache.add_body_sections_by_uid(self._mailbox, uid, bodysections)
             want_commit = True
+        if imap4.MODSEQ in fetch.items:
+            update['modseq'] = fetch.items[imap4.MODSEQ]
         if update:
             self._cache.update_message_by_uid(self._mailbox, uid, **update)
             want_commit = True
@@ -1536,11 +1557,11 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
             seq_set = imap.sequence_set(new)
             self._enqueue_cmd(self._handle_tagged_fetch_envelopes,
                               'FETCH', seq_set, 'ENVELOPE', 'FLAGS',
-                              'X-GM-LABELS', uid=True)
+                              'X-GM-LABELS', 'MODSEQ', uid=True)
         if old:
             seq_set = imap.sequence_set(old)
             self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS',
-                              'X-GM-LABELS', uid=True)
+                              'X-GM-LABELS', 'MODSEQ', uid=True)
         self.dec_pending()
 
     def _handle_tagged_fetch_envelopes(self, resp, disconnected):
@@ -1574,10 +1595,12 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
             envelope = fetch.items.pop(imap4.ENVELOPE)
             flags = fetch.items.pop(imap4.FLAGS)
             labels = fetch.items.pop(imap4.X_GM_LABELS)
+            modseq = fetch.items.pop(imap4.MODSEQ)
             labels.update(self._state._mailbox_labels)
             gm_msgid = self._new_gm_msgids[uid]
             self._cache.add_message_with_envelope(gm_msgid, envelope,
-                                                  flags=flags, labels=labels)
+                                                  flags=flags, labels=labels,
+                                                  modseq=modseq)
             return True
         else:
             return False
@@ -1625,7 +1648,7 @@ class GmailFetchDisconnectedMessagesOperation(_GmailFetchMessagesOperation):
             seq_set = imap.sequence_set(old)
             self._enqueue_cmd(self._handle_tagged,
                               'FETCH', seq_set, 'FLAGS', 'X-GM-LABELS',
-                              uid=True)
+                              'MODSEQ', uid=True)
 
     @_untagged_handler(imap4.FETCH)
     def _handle_fetch(self, resp):

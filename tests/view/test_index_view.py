@@ -15,13 +15,16 @@ class TestIndexView(unittest.TestCase):
         date2 = datetime.datetime.fromtimestamp(2, datetime.timezone.utc)
         self.cache.add_message(1337, date=date2,
                                from_=['"Jane Doe" <jane@example.org>'],
-                               subject='Janie', flags={'\\Seen'}, labels=set())
+                               subject='Janie', flags={'\\Seen'}, labels=set(),
+                               modseq=1)
         self.cache.add_message(1338, date=date1,
                                from_=['"John Doe" <john@example.org>'],
-                               subject='Johnnie', flags={'\\Answered'}, labels=set())
+                               subject='Johnnie', flags={'\\Answered'},
+                               labels=set(), modseq=2)
         self.cache.add_message(1336, date=date2,
                                from_=['"Joe Bloggs" <joe@example.org>'],
-                               subject='Joey', flags={'\\Flagged'}, labels=set())
+                               subject='Joey', flags={'\\Flagged'},
+                               labels=set(), modseq=3)
         self.cache.add_mailbox_uid('INBOX', 1, 1337)
         self.cache.add_mailbox_uid('INBOX', 2, 1338)
         self.cache.add_mailbox_uid('INBOX', 5, 1336)
@@ -164,7 +167,8 @@ class TestIndexView(unittest.TestCase):
         self.index.move_indicator(0)
         self.cache.add_message(1339, date=date,
                                from_=['smith@example.org'],
-                               subject='Smithy', flags={'\\Seen'}, labels=set())
+                               subject='Smithy', flags={'\\Seen'},
+                               labels=set(), modseq=1)
         self.cache.add_mailbox_uid('INBOX', 3, 1339)
         self.check_screen([
             (b'Jan 02 smith@example.o Smithy', 0),
@@ -189,7 +193,7 @@ class TestIndexView(unittest.TestCase):
         self.cache.add_message(1339, date=date,
                                from_=['smith@example.org'],
                                subject='Smithy', flags={'\\Seen'},
-                               labels=set())
+                               labels=set(), modseq=1)
         self.cache.add_mailbox_uid('Sent', 1, 1339)
         self.check_screen([
             (b'Jan 01 Jane Doe        Janie', curses.A_REVERSE),
@@ -203,7 +207,7 @@ class TestIndexView(unittest.TestCase):
         self.cache.add_message(1339, date=date,
                                from_=['smith@example.org'],
                                subject='Smithy', flags={'\\Seen'},
-                               labels=set())
+                               labels=set(), modseq=1)
         self.cache.add_mailbox_uid('INBOX', 3, 1339)
         self.check_screen([
             (b'Jan 02 smith@example.o Smithy', curses.A_REVERSE),
