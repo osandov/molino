@@ -135,6 +135,6 @@ long imap4_token(const char *str, Py_ssize_t len)
 
 if __name__ == '__main__':
     directory = sys.argv[1]
-    create_imap4_init(os.path.join(directory, '__init__.py'))
+    create_imap4_init(os.path.join(directory, 'constants.py'))
     create_header_file(os.path.join(directory, 'parser/tokens.h'))
     create_gperf_output(os.path.join(directory, 'parser/tokens.c'))

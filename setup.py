@@ -16,7 +16,7 @@ def out_of_date(dependency, target):
 class my_build_ext(build_ext):
     def run(self):
         script_path = 'imap4/generate_parser_tokens.py'
-        module_path = 'imap4/__init__.py'
+        module_path = 'imap4/constants.py'
         tokens_path = 'imap4/parser/tokens.c'
         header_path = 'imap4/parser/tokens.h'
         if (out_of_date(script_path, module_path) or

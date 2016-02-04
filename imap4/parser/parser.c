@@ -358,7 +358,7 @@ Token_FromLong(long token)
 	PyObject *module;
 	PyObject *token_obj;
 
-	module = PyImport_ImportModule("imap4");
+	module = PyImport_ImportModule("imap4.constants");
 	if (module == NULL)
 		return NULL;
 	token_obj = PyObject_CallMethod(module, "Token", "(l)", token);
