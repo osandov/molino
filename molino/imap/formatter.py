@@ -9,6 +9,31 @@ _list_re = re.compile(b'[^(){ "\\\\\x00-\x1f\x7f-\xff]+')
 _text_re = re.compile(b'[^\x00\r\n\x7f-\xff]+')
 
 
+def list_as_sequence_set(iterable, is_sorted=False):
+    """Convert an iterable of IDs into a sequence set."""
+    if not is_sorted:
+        iterable = sorted(iterable)
+    seq_set = []
+    start = end = None
+    for id in iterable:
+        if start is None:
+            start = end = id
+        elif id == end + 1:
+            end = id
+        else:
+            if start == end:
+                seq_set.append('%d' % start)
+            else:
+                seq_set.append('%d:%d' % (start, end))
+            start = end = id
+    if start is not None:
+        if start == end:
+            seq_set.append('%d' % start)
+        else:
+            seq_set.append('%d:%d' % (start, end))
+    return ','.join(seq_set)
+
+
 """
 The following functions are used to format an IMAP4 command as per the
 protocol. They all take some arguments in common in addition to the
@@ -133,21 +158,12 @@ def format_fetch(buffer, tag, seq_set, *items, uid=False, changedsince=None):
     Format FETCH command.
 
     uid - use UID FETCH to use unique identifiers instead of sequence numbers
-    seq_set - identifiers to fetch; see sequence_set()
+    seq_set - identifiers to fetch as a string
     items - items to fetch
     """
     conts = _format_common(buffer, tag, 'UID FETCH' if uid else 'FETCH')
     buffer.extend(b' ')
-    for i, seq in enumerate(seq_set):
-        if i != 0:
-            buffer.extend(b',')
-        if seq is None:
-            buffer.extend(b'*')
-        elif isinstance(seq, int):
-            buffer.extend(b'%d' % seq)
-        else:
-            buffer.extend(b'*' if seq[0] is None else b'%d' % seq[0])
-            buffer.extend(b':*' if seq[1] is None else b':%d' % seq[1])
+    buffer.extend(seq_set.encode('ascii'))
     buffer.extend(b' ')
     if len(items) == 1:
         buffer.extend(items[0].encode('ascii'))

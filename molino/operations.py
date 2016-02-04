@@ -1227,12 +1227,12 @@ class _IMAPSelectedState(_IMAPStateOperation):
             elif work.type == Work.Type.fetch_bodystructure:
                 uid, = work.args
                 self._enqueue_cmd(lambda resp, dis: self._handle_tagged_fetch(resp, dis, work),
-                                  'FETCH', [uid], 'BODYSTRUCTURE', uid=True)
+                                  'FETCH', str(uid), 'BODYSTRUCTURE', uid=True)
             elif work.type == Work.Type.fetch_body_sections:
                 # TODO: partial fetches if too big/background downloads?
                 uid, sections = work.args
                 self._enqueue_cmd(lambda resp, dis: self._handle_tagged_fetch(resp, dis, work),
-                                  'FETCH', [uid], *['BODY.PEEK[%s]' % section for section in sections], uid=True)
+                                  'FETCH', str(uid), *['BODY.PEEK[%s]' % section for section in sections], uid=True)
             else:
                 assert False
         elif self._new_messages > 0:
@@ -1554,12 +1554,12 @@ class _GmailFetchMessagesOperation(_IMAPSubOperation):
         old, new = self._cache.get_fetching_old_new_gm_msgids()
         if new:
             self._new_gm_msgids = new
-            seq_set = imap.sequence_set(new)
+            seq_set = imap.formatter.list_as_sequence_set(new, is_sorted=True)
             self._enqueue_cmd(self._handle_tagged_fetch_envelopes,
                               'FETCH', seq_set, 'ENVELOPE', 'FLAGS',
                               'X-GM-LABELS', 'MODSEQ', uid=True)
         if old:
-            seq_set = imap.sequence_set(old)
+            seq_set = imap.formatter.list_as_sequence_set(old, is_sorted=True)
             self._enqueue_cmd(self._handle_tagged, 'FETCH', seq_set, 'FLAGS',
                               'X-GM-LABELS', 'MODSEQ', uid=True)
         self.dec_pending()
@@ -1615,7 +1615,7 @@ class GmailFetchNewMessagesOperation(_GmailFetchMessagesOperation):
         super().start()
         self._cache.create_temp_fetching_table(self._mailbox)
         self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
-                          'FETCH', [(self._uidnext, None)], 'X-GM-MSGID', uid=True)
+                          'FETCH', '%d:*' % self._uidnext, 'X-GM-MSGID', uid=True)
 
     @_untagged_handler(imap4.FETCH)
     def _handle_fetch(self, resp):
@@ -1641,11 +1641,11 @@ class GmailFetchDisconnectedMessagesOperation(_GmailFetchMessagesOperation):
         self._cache.delete_fetching_missing(self._start_uid, self._end_uid)
         old, new = self._cache.get_fetching_old_new_uids()
         if new:
-            seq_set = imap.sequence_set(new)
+            seq_set = imap.formatter.list_as_sequence_set(new, is_sorted=True)
             self._enqueue_cmd(self._handle_tagged_fetch_gm_msgids,
                               'FETCH', seq_set, 'X-GM-MSGID', uid=True)
         if old:
-            seq_set = imap.sequence_set(old)
+            seq_set = imap.formatter.list_as_sequence_set(old, is_sorted=True)
             self._enqueue_cmd(self._handle_tagged,
                               'FETCH', seq_set, 'FLAGS', 'X-GM-LABELS',
                               'MODSEQ', uid=True)

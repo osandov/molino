@@ -1,4 +1,5 @@
 import ast
+from collections import OrderedDict
 import datetime
 import email.header
 import email.utils
@@ -369,24 +370,24 @@ class Cache:
     def get_fetching_old_new_uids(self):
         cur = self.db.execute('''
         SELECT uid, uid IN (SELECT uid FROM gmail_mailbox_uids WHERE mailbox=?)
-        FROM temp.fetching
+        FROM temp.fetching ORDER BY uid ASC
         ''', (self._fetching_mailbox,))
-        old = set()
-        new = set()
+        old = []
+        new = []
         for row in cur:
             if row[1]:
-                old.add(row[0])
+                old.append(row[0])
             else:
-                new.add(row[0])
+                new.append(row[0])
         return old, new
 
     def get_fetching_old_new_gm_msgids(self):
         cur = self.db.execute('''
         SELECT uid, gm_msgid, gm_msgid IN (SELECT gm_msgid FROM gmail_messages)
-        FROM temp.fetching
+        FROM temp.fetching ORDER BY uid ASC
         ''')
-        old = {}
-        new = {}
+        old = OrderedDict()
+        new = OrderedDict()
         for row in cur:
             if row[2]:
                 old[row[0]] = row[1]

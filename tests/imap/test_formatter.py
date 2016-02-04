@@ -63,6 +63,14 @@ class TestFormat(unittest.TestCase):
         self.assertEqual(self.buffer, b'(() 100 (200 (210 211) 220) (300 350))')
         self.assertEqual(conts, [])
 
+    def test_sequence_set(self):
+        self.assertEqual(list_as_sequence_set([]), '')
+        self.assertEqual(list_as_sequence_set([2, 1, 3]), '1:3')
+        self.assertEqual(list_as_sequence_set([1, 3, 7, 5, 4]), '1,3:5,7')
+        self.assertEqual(list_as_sequence_set([1, 3, 4, 5, 6, 7]), '1,3:7')
+        self.assertEqual(list_as_sequence_set([1, 2, 3, 4, 5, 7]), '1:5,7')
+        self.assertEqual(list_as_sequence_set([1, 3, 5, 7]), '1,3,5,7')
+
     def test_capability(self):
         conts = format_capability(self.buffer, 'A001')
         self.assertEqual(self.buffer, b'A001 CAPABILITY\r\n')
@@ -89,23 +97,23 @@ class TestFormat(unittest.TestCase):
         self.assertEqual(conts, [])
 
     def test_fetch(self):
-        conts = format_fetch(self.buffer, 'A001', [1], 'UID')
+        conts = format_fetch(self.buffer, 'A001', '1', 'UID')
         self.assertEqual(self.buffer, b'A001 FETCH 1 UID\r\n')
         self.assertEqual(conts, [])
 
         self.buffer.clear()
-        conts = format_fetch(self.buffer, 'A001', [(1, 100)], 'ENVELOPE', uid=True)
+        conts = format_fetch(self.buffer, 'A001', '1:100', 'ENVELOPE', uid=True)
         self.assertEqual(self.buffer, b'A001 UID FETCH 1:100 ENVELOPE\r\n')
         self.assertEqual(conts, [])
 
         self.buffer.clear()
-        conts = format_fetch(self.buffer, 'A001', [(1, 49), (51, 100)], 'UID', 'ENVELOPE')
+        conts = format_fetch(self.buffer, 'A001', '1:49,51:100', 'UID', 'ENVELOPE')
         self.assertEqual(self.buffer, b'A001 FETCH 1:49,51:100 (UID ENVELOPE)\r\n')
         self.assertEqual(conts, [])
 
         self.buffer.clear()
-        conts = format_fetch(self.buffer, 's100', [(1, 10)], 'FLAGS', uid=True, changedsince=12345)
-        self.assertEqual(self.buffer, b's100 UID FETCH 1:10 FLAGS (CHANGEDSINCE 12345)\r\n')
+        conts = format_fetch(self.buffer, 's100', '1:*', 'FLAGS', uid=True, changedsince=12345)
+        self.assertEqual(self.buffer, b's100 UID FETCH 1:* FLAGS (CHANGEDSINCE 12345)\r\n')
         self.assertEqual(conts, [])
 
     def test_idle(self):
