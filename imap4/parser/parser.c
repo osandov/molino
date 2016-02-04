@@ -98,6 +98,7 @@ static PyObject *parse_env_addrs(Py_buffer *, Py_ssize_t *);
 static PyObject *parse_env_date(Py_buffer *, Py_ssize_t *);
 static PyObject *parse_esearch_response(Py_buffer *, Py_ssize_t *);
 static PyObject *parse_flag_list(Py_buffer *, Py_ssize_t *);
+static PyObject *parse_label_list(Py_buffer *, Py_ssize_t *);
 static PyObject *parse_mailbox(Py_buffer *, Py_ssize_t *);
 static PyObject *parse_mailbox_list(Py_buffer *, Py_ssize_t *);
 static PyObject *parse_mbx_list_flags(Py_buffer *, Py_ssize_t *);
@@ -1527,6 +1528,44 @@ err:
 }
 
 /*
+ * label-list - returns set of bytes
+ */
+static PyObject *
+parse_label_list(Py_buffer *view, Py_ssize_t *cur)
+{
+	PyObject *labels = NULL;
+
+	labels = PySet_New(NULL);
+	if (labels == NULL)
+		goto err;
+	EXPECTC('(');
+	if (PEEKC() == ')') {
+		GETC();
+		return labels;
+	}
+	while (1) {
+		PyObject *label;
+		label = parse_astring(view, cur);
+		if (label == NULL)
+			goto err;
+		if (PySet_Add(labels, label) < 0) {
+			Py_DECREF(label);
+			goto err;
+		}
+		Py_DECREF(label);
+		if (PEEKC() != ' ')
+			break;
+		GETC();
+	}
+	EXPECTC(')');
+	return labels;
+
+err:
+	Py_XDECREF(labels);
+	return NULL;
+}
+
+/*
  * mailbox - returns bytes
  */
 static PyObject *
@@ -1739,12 +1778,6 @@ parse_msg_att(Py_buffer *view, Py_ssize_t *cur)
 		if (token < 0)
 			goto err;
 		switch (token) {
-		/* msg-att-dynamic */
-		case IMAP4_FLAGS:
-			EXPECTC(' ');
-			att_data = parse_flag_list(view, cur);
-			break;
-		/* msg-att-static */
 		case IMAP4_BODY:
 			if (PEEKC() == '[') {
 				if (bodysections == NULL) {
@@ -1767,6 +1800,10 @@ parse_msg_att(Py_buffer *view, Py_ssize_t *cur)
 			EXPECTC(' ');
 			att_data = parse_envelope(view, cur);
 			break;
+		case IMAP4_FLAGS:
+			EXPECTC(' ');
+			att_data = parse_flag_list(view, cur);
+			break;
 		case IMAP4_INTERNALDATE:
 			EXPECTC(' ');
 			att_data = parse_date_time(view, cur);
@@ -1787,8 +1824,13 @@ parse_msg_att(Py_buffer *view, Py_ssize_t *cur)
 		case IMAP4_RFC822_SIZE:
 		case IMAP4_UID:
 		case IMAP4_X_GM_MSGID:
+		case IMAP4_X_GM_THRID:
 			EXPECTC(' ');
 			att_data = parse_number(view, cur);
+			break;
+		case IMAP4_X_GM_LABELS:
+			EXPECTC(' ');
+			att_data = parse_label_list(view, cur);
 			break;
 		default:
 			PARSE_ERROR("unknown FETCH item");

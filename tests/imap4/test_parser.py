@@ -200,6 +200,13 @@ Message-ID: <1234@local.machine.example>
         self._test(b'* 1 FETCH (MODSEQ (624140003))\r\n',
                    UntaggedResponse([FETCH, Fetch([1, {MODSEQ: 624140003}])]))
 
+        self._test(b'* 1 FETCH (X-GM-THRID 1509653592627481811 X-GM-LABELS ("\\\\Important" Linux))\r\n',
+                   UntaggedResponse([FETCH, Fetch([1, {X_GM_THRID: 1509653592627481811,
+                                                       X_GM_LABELS: {b"\\Important", b"Linux"}}])]))
+
+        self._test(b'* 1 FETCH (X-GM-LABELS ())\r\n',
+                   UntaggedResponse([FETCH, Fetch([1, {X_GM_LABELS: set()}])]))
+
     def test_envelope(self):
         env = Envelope([None, None, None, None, None, None, None, None, None, None])
         self._test(b'* 2 FETCH (ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL))\r\n',

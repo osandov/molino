@@ -48,7 +48,9 @@ tokens = [
     b'UIDNEXT',
     b'UIDVALIDITY',
     b'UNSEEN',
+    b'X-GM-LABELS',
     b'X-GM-MSGID',
+    b'X-GM-THRID',
 ]
 
 
